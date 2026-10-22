@@ -1,0 +1,10 @@
+# Validate model sizes and concurrency on the target Windows Server before use.
+[voice]
+asr_model = "large-v3-turbo"
+asr_device = "auto"
+asr_compute_type = "default"
+tts_voice = "ur_PK-fasih-medium"
+tts_model_dir = "data/models/piper"
+llm_model = "qwen3:8b"
+ollama_base_url = "http://127.0.0.1:11434/v1"
+idle_timeout_seconds = 180.0

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import contextlib
 import json
 import secrets
@@ -83,14 +84,17 @@ class DiagoTelephonyPort:
         self._event_queues: dict[str, asyncio.Queue[CallEvent | None]] = {}
         self._audio_queues: dict[str, asyncio.Queue[AudioFrame | None]] = {}
         self._write_lock = asyncio.Lock()
+        self._connect_lock = asyncio.Lock()
+        self._last_monotonic_ms: dict[str, int] = {}
 
     async def connect(self) -> None:
-        if self._writer is not None:
-            return
-        self._reader, self._writer = await asyncio.open_connection(
-            self._host, self._port
-        )
-        self._reader_task = asyncio.create_task(self._read_loop())
+        async with self._connect_lock:
+            if self._writer is not None:
+                return
+            self._reader, self._writer = await asyncio.open_connection(
+                self._host, self._port
+            )
+            self._reader_task = asyncio.create_task(self._read_loop())
 
     async def close(self) -> None:
         writer, self._writer = self._writer, None
@@ -151,21 +155,29 @@ class DiagoTelephonyPort:
 
     async def events(self, call_id: str) -> AsyncIterator[CallEvent]:
         queue = self._event_queues.setdefault(call_id, asyncio.Queue(maxsize=256))
-        while True:
-            event = await queue.get()
-            if event is None:
-                return
-            yield event
-            if event.event in {CallEventType.HANGUP, CallEventType.FAILED}:
-                return
+        try:
+            while True:
+                event = await queue.get()
+                if event is None:
+                    return
+                yield event
+                if event.event in {CallEventType.HANGUP, CallEventType.FAILED}:
+                    return
+        finally:
+            if self._event_queues.get(call_id) is queue:
+                self._event_queues.pop(call_id, None)
 
     async def incoming_audio(self, call_id: str) -> AsyncIterator[AudioFrame]:
         queue = self._audio_queues.setdefault(call_id, asyncio.Queue(maxsize=512))
-        while True:
-            frame = await queue.get()
-            if frame is None:
-                return
-            yield frame
+        try:
+            while True:
+                frame = await queue.get()
+                if frame is None:
+                    return
+                yield frame
+        finally:
+            if self._audio_queues.get(call_id) is queue:
+                self._audio_queues.pop(call_id, None)
 
     async def _command(self, command: str, **payload: object) -> _Response:
         await self.connect()
@@ -199,15 +211,31 @@ class DiagoTelephonyPort:
         try:
             while line := await self._reader.readline():
                 if len(line) > 2_600_000:
-                    raise BridgeProtocolError("media bridge message exceeded size limit")
+                    raise BridgeProtocolError(
+                        "media bridge message exceeded size limit"
+                    )
                 self._route_message(json.loads(line))
             raise BridgeProtocolError("media bridge disconnected")
         except asyncio.CancelledError:
             raise
-        except (OSError, json.JSONDecodeError, ValidationError, BridgeProtocolError) as exc:
+        except (
+            OSError,
+            asyncio.QueueFull,
+            binascii.Error,
+            json.JSONDecodeError,
+            ValidationError,
+            BridgeProtocolError,
+        ) as exc:
             error = BridgeProtocolError(f"media bridge read failed: {exc}")
             self._fail_pending(error)
             self._close_streams()
+        finally:
+            writer, self._writer = self._writer, None
+            self._reader = None
+            if writer is not None:
+                writer.close()
+                with contextlib.suppress(OSError):
+                    await writer.wait_closed()
 
     def _route_message(self, raw: dict[str, Any]) -> None:
         message_type = raw.get("type")
@@ -219,9 +247,8 @@ class DiagoTelephonyPort:
             return
         if message_type == "event":
             event = _Event.model_validate(raw)
-            public_event = CallEvent.model_validate(
-                event.model_dump(exclude={"type"})
-            )
+            public_event = CallEvent.model_validate(event.model_dump(exclude={"type"}))
+            self._last_monotonic_ms[event.call_id] = event.monotonic_ms
             queue = self._event_queues.get(event.call_id)
             if queue is not None:
                 queue.put_nowait(public_event)
@@ -242,6 +269,7 @@ class DiagoTelephonyPort:
                 channels=audio.channels,
                 monotonic_ms=audio.monotonic_ms,
             )
+            self._last_monotonic_ms[audio.call_id] = audio.monotonic_ms
             queue = self._audio_queues.get(audio.call_id)
             if queue is not None:
                 queue.put_nowait(frame)
@@ -254,10 +282,22 @@ class DiagoTelephonyPort:
                 future.set_exception(error)
 
     def _close_streams(self) -> None:
-        for queue in self._event_queues.values():
-            with contextlib.suppress(asyncio.QueueFull):
-                queue.put_nowait(None)
+        for call_id, queue in self._event_queues.items():
+            failed = CallEvent(
+                call_id=call_id,
+                event=CallEventType.FAILED,
+                monotonic_ms=self._last_monotonic_ms.get(call_id, 0),
+                reason="bridge_disconnected",
+            )
+            self._force_put(queue, failed)
         for queue in self._audio_queues.values():
-            with contextlib.suppress(asyncio.QueueFull):
-                queue.put_nowait(None)
+            self._force_put(queue, None)
 
+    @staticmethod
+    def _force_put(
+        queue: asyncio.Queue[CallEvent | AudioFrame | None],
+        value: CallEvent | AudioFrame | None,
+    ) -> None:
+        if queue.full():
+            queue.get_nowait()
+        queue.put_nowait(value)

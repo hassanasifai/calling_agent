@@ -54,7 +54,11 @@ class FakeBridge:
                                     "call_id": command["call_id"],
                                     "event": event,
                                     "monotonic_ms": 10,
-                                    **({"codec": "PCMA"} if event == "RTP_READY" else {}),
+                                    **(
+                                        {"codec": "PCMA"}
+                                        if event == "RTP_READY"
+                                        else {}
+                                    ),
                                 }
                             ).encode()
                             + b"\n"

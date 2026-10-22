@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -155,8 +154,7 @@ func (b *bridge) serveClient(ctx context.Context, client *clientConn) {
 	scanner := bufio.NewScanner(client.conn)
 	scanner.Buffer(make([]byte, 64*1024), maxControlMessageBytes)
 	for scanner.Scan() {
-		var request command
-		decoderErr := json.Unmarshal(scanner.Bytes(), &request)
+		request, decoderErr := decodeCommand(scanner.Bytes())
 		if decoderErr != nil {
 			_ = client.send(response{Type: "response", OK: false, Error: "invalid_json"})
 			continue
@@ -317,7 +315,7 @@ func (s *callSession) run(number string) {
 		Username:  s.bridge.cfg.SIPUser,
 		Password:  s.bridge.cfg.SIPPassword,
 		OnResponse: func(res *sip.Response) error {
-			if res.StatusCode == sip.StatusRinging || res.StatusCode == sip.StatusSessionProgress {
+			if res.StatusCode == sip.StatusRinging || res.StatusCode == 183 {
 				s.mu.Lock()
 				first := !s.ringing
 				s.ringing = true
@@ -410,9 +408,9 @@ func setupPCM(med *diago.DialogMedia) (io.Reader, io.Writer, media.Codec, error)
 func (s *callSession) readPCM(reader io.Reader, frameBytes int, sampleRate int, result chan<- error) {
 	buffer := make([]byte, frameBytes)
 	for {
-		n, err := reader.Read(buffer)
+		n, err := io.ReadFull(reader, buffer)
 		if err != nil {
-			result <- err
+			reportMediaError(result, err)
 			return
 		}
 		if n == 0 {
@@ -428,19 +426,33 @@ func (s *callSession) readPCM(reader io.Reader, frameBytes int, sampleRate int, 
 			MonotonicMS: s.bridge.monotonicMS(),
 		}
 		if err := s.owner.send(message); err != nil {
-			result <- err
+			reportMediaError(result, err)
 			return
 		}
 	}
 }
 
 func (s *callSession) writePCM(frameBytes int, frameDuration time.Duration, result chan<- error) {
+	nextWrite := time.Now()
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
 		case pcm := <-s.audioCh:
 			for offset := 0; offset < len(pcm); offset += frameBytes {
+				now := time.Now()
+				if nextWrite.Before(now.Add(-frameDuration)) {
+					nextWrite = now
+				}
+				if wait := time.Until(nextWrite); wait > 0 {
+					timer := time.NewTimer(wait)
+					select {
+					case <-s.ctx.Done():
+						timer.Stop()
+						return
+					case <-timer.C:
+					}
+				}
 				end := offset + frameBytes
 				frame := make([]byte, frameBytes)
 				if end > len(pcm) {
@@ -451,18 +463,19 @@ func (s *callSession) writePCM(frameBytes int, frameDuration time.Duration, resu
 				writer := s.pcmWriter
 				s.mu.Unlock()
 				if _, err := writer.Write(frame); err != nil {
-					result <- err
+					reportMediaError(result, err)
 					return
 				}
-				timer := time.NewTimer(frameDuration)
-				select {
-				case <-s.ctx.Done():
-					timer.Stop()
-					return
-				case <-timer.C:
-				}
+				nextWrite = nextWrite.Add(frameDuration)
 			}
 		}
+	}
+}
+
+func reportMediaError(result chan<- error, err error) {
+	select {
+	case result <- err:
+	default:
 	}
 }
 
@@ -531,4 +544,3 @@ func classifyError(err error) string {
 	}
 	return "transport_error"
 }
-

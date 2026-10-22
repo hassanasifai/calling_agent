@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
+	"io"
 	"net"
 	"sync"
 )
@@ -75,3 +78,15 @@ func tokenMatches(received string, expected string) bool {
 	return subtle.ConstantTimeCompare(receivedHash[:], expectedHash[:]) == 1
 }
 
+func decodeCommand(data []byte) (command, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var request command
+	if err := decoder.Decode(&request); err != nil {
+		return command{}, err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return command{}, errors.New("multiple JSON values")
+	}
+	return request, nil
+}

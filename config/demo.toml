@@ -1,0 +1,9 @@
+[voice]
+asr_model = "small"
+asr_device = "cpu"
+asr_compute_type = "int8"
+tts_voice = "ur_PK-fasih-medium"
+tts_model_dir = "data/models/piper"
+llm_model = "qwen3:1.7b"
+ollama_base_url = "http://127.0.0.1:11434/v1"
+idle_timeout_seconds = 120.0

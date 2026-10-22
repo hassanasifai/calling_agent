@@ -3,10 +3,16 @@
 __pycache__/
 .pytest_cache/
 .ruff_cache/
+_research/
+.cache/
+.tmp/
+.coverage
+*.egg-info/
 *.py[cod]
 *.exe
 transport/diago-sidecar/bin/
 data/private/
+data/models/
 data/*.csv
 *.pcm
 *.wav
