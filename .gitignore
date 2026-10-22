@@ -1,0 +1,13 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.py[cod]
+*.exe
+transport/diago-sidecar/bin/
+data/private/
+data/*.csv
+*.pcm
+*.wav
+
