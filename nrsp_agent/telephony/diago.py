@@ -86,6 +86,7 @@ class DiagoTelephonyPort:
         self._write_lock = asyncio.Lock()
         self._connect_lock = asyncio.Lock()
         self._last_monotonic_ms: dict[str, int] = {}
+        self.dropped_audio_frames = 0
 
     async def connect(self) -> None:
         async with self._connect_lock:
@@ -138,8 +139,11 @@ class DiagoTelephonyPort:
             raise
         return CallHandle(call_id=call_id, gateway_id=gateway_id)
 
-    async def hangup(self, call_id: str, reason: str) -> None:
-        await self._command("hangup", call_id=call_id, reason=reason)
+    async def hangup(self, call_id: str, reason: str, *, drain: bool = False) -> None:
+        await self._command("hangup", call_id=call_id, reason=reason, drain=drain)
+
+    async def clear_audio(self, call_id: str) -> None:
+        await self._command("clear_audio", call_id=call_id)
 
     async def send_audio(self, call_id: str, frame: AudioFrame) -> None:
         if frame.call_id != call_id:
@@ -272,6 +276,11 @@ class DiagoTelephonyPort:
             self._last_monotonic_ms[audio.call_id] = audio.monotonic_ms
             queue = self._audio_queues.get(audio.call_id)
             if queue is not None:
+                # A stalled consumer must cost only stale caller audio for that
+                # call, never the shared bridge connection.
+                if queue.full():
+                    queue.get_nowait()
+                    self.dropped_audio_frames += 1
                 queue.put_nowait(frame)
             return
         raise BridgeProtocolError("unknown media bridge message type")

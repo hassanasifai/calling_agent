@@ -22,6 +22,7 @@ type config struct {
 	LiveCalls      bool
 	AllowedNumbers map[string]struct{}
 	InviteTimeout  time.Duration
+	RTPTimeout     time.Duration
 }
 
 func loadConfig() (config, error) {
@@ -49,6 +50,11 @@ func loadConfig() (config, error) {
 	} else {
 		cfg.InviteTimeout = time.Duration(seconds) * time.Second
 	}
+	if seconds, parseErr := envInt("NRSP_RTP_TIMEOUT_SECONDS", 15); parseErr != nil {
+		return config{}, parseErr
+	} else {
+		cfg.RTPTimeout = time.Duration(seconds) * time.Second
+	}
 	if err := cfg.validate(); err != nil {
 		return config{}, err
 	}
@@ -75,6 +81,9 @@ func (c config) validate() error {
 	}
 	if c.InviteTimeout < time.Second || c.InviteTimeout > 10*time.Minute {
 		return fmt.Errorf("NRSP_SIP_INVITE_TIMEOUT_SECONDS must be between 1 and 600")
+	}
+	if c.RTPTimeout < 2*time.Second || c.RTPTimeout > 5*time.Minute {
+		return fmt.Errorf("NRSP_RTP_TIMEOUT_SECONDS must be between 2 and 300")
 	}
 	if c.LiveCalls && len(c.AllowedNumbers) == 0 {
 		return fmt.Errorf("NRSP_LIVE_CALL_ALLOWLIST is required when live calls are enabled")

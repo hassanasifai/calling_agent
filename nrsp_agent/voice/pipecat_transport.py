@@ -5,14 +5,18 @@ from __future__ import annotations
 import asyncio
 import time
 
+from loguru import logger
 from pipecat.audio.resamplers.soxr_stream_resampler import SOXRStreamAudioResampler
 from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
+    Frame,
     InputAudioRawFrame,
+    InterruptionFrame,
     OutputAudioRawFrame,
     StartFrame,
 )
+from pipecat.processors.frame_processor import FrameDirection
 from pipecat.transports.base_input import BaseInputTransport
 from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import BaseTransport, TransportParams
@@ -32,6 +36,7 @@ class DiagoTransportParams(TransportParams):
     audio_out_10ms_chunks: int = 2
     audio_out_auto_silence: bool = False
     audio_out_end_silence_secs: int = 0
+    playout_lead_secs: float = 0.08
 
 
 class DiagoInputTransport(BaseInputTransport):
@@ -97,7 +102,15 @@ class DiagoInputTransport(BaseInputTransport):
 
 
 class DiagoOutputTransport(BaseOutputTransport):
-    """Send Pipecat output PCM to the bridge without handling RTP in Python."""
+    """Send Pipecat output PCM to the bridge without handling RTP in Python.
+
+    Pipecat's base output transport does not pace writes, and TTS runs much
+    faster than real time. Writes are therefore paced to the call's playout
+    clock, staying at most ``playout_lead_secs`` ahead of the bridge's RTP
+    clock. That keeps Pipecat's bot-speaking state and interruptions aligned
+    with what the caller actually hears and bounds the bridge queue; on an
+    interruption the small remaining bridge queue is cleared.
+    """
 
     def __init__(
         self,
@@ -109,22 +122,46 @@ class DiagoOutputTransport(BaseOutputTransport):
         super().__init__(params, **kwargs)
         self._port = port
         self._call_id = call_id
+        self._lead_secs = params.playout_lead_secs
+        self._playout_end = 0.0
 
     async def start(self, frame: StartFrame) -> None:
         await super().start(frame)
         await self.set_transport_ready(frame)
 
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+        if isinstance(frame, InterruptionFrame):
+            self._playout_end = 0.0
+            try:
+                await self._port.clear_audio(self._call_id)
+            except Exception as exc:  # call may already be gone
+                logger.debug(f"{self} clear_audio skipped: {exc}")
+
     async def write_audio_frame(self, frame: OutputAudioRawFrame) -> bool:
-        await self._port.send_audio(
-            self._call_id,
-            AudioFrame(
-                call_id=self._call_id,
-                pcm16=frame.audio,
-                sample_rate=frame.sample_rate,
-                channels=frame.num_channels,
-                monotonic_ms=time.monotonic_ns() // 1_000_000,
-            ),
-        )
+        now = time.monotonic()
+        wait = self._playout_end - now - self._lead_secs
+        if wait > 0:
+            await asyncio.sleep(wait)
+            now = time.monotonic()
+        try:
+            await self._port.send_audio(
+                self._call_id,
+                AudioFrame(
+                    call_id=self._call_id,
+                    pcm16=frame.audio,
+                    sample_rate=frame.sample_rate,
+                    channels=frame.num_channels,
+                    monotonic_ms=time.monotonic_ns() // 1_000_000,
+                ),
+            )
+        except Exception as exc:
+            # The call ended under us (remote hangup); the session layer owns
+            # terminal handling, so do not spam pipeline errors per chunk.
+            logger.debug(f"{self} audio write rejected: {exc}")
+            return False
+        duration = len(frame.audio) / (2 * frame.num_channels * frame.sample_rate)
+        self._playout_end = max(self._playout_end, now) + duration
         return True
 
 

@@ -18,6 +18,7 @@ func validTestConfig() config {
 		GatewayID:      "sim-1",
 		AllowedNumbers: map[string]struct{}{},
 		InviteTimeout:  30 * time.Second,
+		RTPTimeout:     15 * time.Second,
 	}
 }
 

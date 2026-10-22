@@ -22,6 +22,7 @@ type command struct {
 	GatewayID  string `json:"gateway_id,omitempty"`
 	Number     string `json:"number,omitempty"`
 	Reason     string `json:"reason,omitempty"`
+	Drain      bool   `json:"drain,omitempty"`
 	SampleRate int    `json:"sample_rate,omitempty"`
 	Channels   int    `json:"channels,omitempty"`
 	Encoding   string `json:"encoding,omitempty"`

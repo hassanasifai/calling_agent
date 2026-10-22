@@ -5,17 +5,23 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator
+from dataclasses import asdict
 from enum import StrEnum
 
+from loguru import logger
 from pipecat.workers.runner import WorkerRunner
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
+from nrsp_agent.conversation.policy import ConversationPolicy, CustomerContext
+from nrsp_agent.conversation.processors import ConversationRecord
 from nrsp_agent.telephony.contracts import CallEvent, CallEventType, TelephonyPort
 from nrsp_agent.voice.local_pipeline import (
     LocalVoicePipelineSettings,
     build_local_voice_agent,
 )
 from nrsp_agent.voice.pipecat_transport import DiagoPipecatTransport
+
+_TERMINAL = {CallEventType.HANGUP, CallEventType.FAILED}
 
 
 class SessionResultType(StrEnum):
@@ -31,6 +37,12 @@ class SessionResult(BaseModel):
     result: SessionResultType
     reason: str | None = None
     sip_status: int | None = None
+    outcome: str | None = None
+    verified: bool = False
+    transcript: list[dict[str, object]] = Field(default_factory=list)
+    events: list[tuple[int, str]] = Field(default_factory=list)
+    metrics: list[dict[str, object]] = Field(default_factory=list)
+    guard_rejections: int = 0
 
 
 async def run_outbound_session(
@@ -40,25 +52,55 @@ async def run_outbound_session(
     gateway_id: str,
     call_id: str,
     voice_settings: LocalVoicePipelineSettings,
+    customer: CustomerContext,
 ) -> SessionResult:
     """Run one allowlisted outbound call until SIP or the AI pipeline ends."""
+    policy = ConversationPolicy(customer)
+    # Build before dialing: model loading must not delay the greeting.
+    agent = build_local_voice_agent(
+        DiagoPipecatTransport(port, call_id), voice_settings, policy
+    )
+    record = agent.record
+
+    def result(kind: SessionResultType, event: CallEvent | None, reason: str | None):
+        return SessionResult(
+            call_id=call_id,
+            result=kind,
+            reason=reason,
+            sip_status=event.sip_status if event else None,
+            outcome=policy.outcome.value,
+            verified=policy.verified,
+            transcript=[asdict(turn) for turn in record.turns],
+            events=list(record.events),
+            metrics=list(record.metrics),
+            guard_rejections=len(record.guard_rejections),
+        )
+
     await port.start_call(number, gateway_id, call_id)
     events = port.events(call_id)
-    answered = await _wait_for_answer(events)
-    if answered.event == CallEventType.FAILED:
-        return _terminal_result(answered)
+    media_event = await _wait_for_media(events, record)
+    if media_event.event in _TERMINAL:
+        kind = (
+            SessionResultType.CALL_FAILED
+            if media_event.event == CallEventType.FAILED
+            else SessionResultType.REMOTE_HANGUP
+        )
+        return result(kind, media_event, media_event.reason)
 
-    transport = DiagoPipecatTransport(port, call_id)
-    agent = build_local_voice_agent(transport, voice_settings)
     runner = WorkerRunner(handle_sigint=False)
     await runner.add_workers(agent.worker)
+    greeted = False
 
     @agent.worker.event_handler("on_pipeline_started")
     async def queue_greeting(*_: object) -> None:
-        await agent.queue_initial_greeting()
+        nonlocal greeted
+        if not greeted:
+            greeted = True
+            record.add_event("greeting_queued")
+            await agent.queue_initial_greeting()
 
     runner_task = asyncio.create_task(runner.run())
-    terminal_task = asyncio.create_task(_wait_for_terminal(events))
+    terminal_task = asyncio.create_task(_wait_for_terminal(events, record))
     try:
         done, _ = await asyncio.wait(
             {runner_task, terminal_task}, return_when=asyncio.FIRST_COMPLETED
@@ -67,17 +109,23 @@ async def run_outbound_session(
             event = terminal_task.result()
             await runner.cancel(reason=event.reason or event.event.value)
             await runner_task
-            return _terminal_result(event)
+            kind = (
+                SessionResultType.CALL_FAILED
+                if event.event == CallEventType.FAILED
+                else SessionResultType.REMOTE_HANGUP
+            )
+            return result(kind, event, event.reason)
 
         await runner_task
-        await port.hangup(call_id, "pipeline_finished")
-        return SessionResult(
-            call_id=call_id,
-            result=SessionResultType.PIPELINE_FINISHED,
-            reason="pipeline_finished",
-        )
+        reason = policy.outcome.value
+        record.add_event("local_hangup")
+        await _hangup_quietly(port, call_id, reason, drain=True)
+        # The bridge reports HANGUP once the drained closing speech has played.
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(terminal_task), 15)
+        return result(SessionResultType.PIPELINE_FINISHED, None, reason)
     except asyncio.CancelledError:
-        await port.hangup(call_id, "session_cancelled")
+        await _hangup_quietly(port, call_id, "session_cancelled", drain=False)
         await runner.cancel(reason="session_cancelled")
         raise
     finally:
@@ -87,31 +135,31 @@ async def run_outbound_session(
                 await terminal_task
 
 
-async def _wait_for_answer(events: AsyncIterator[CallEvent]) -> CallEvent:
-    async for event in events:
-        if event.event == CallEventType.ANSWERED:
-            return event
-        if event.event in {CallEventType.HANGUP, CallEventType.FAILED}:
-            return event
-    raise RuntimeError("call event stream ended before answer")
+async def _hangup_quietly(
+    port: TelephonyPort, call_id: str, reason: str, *, drain: bool
+) -> None:
+    try:
+        await port.hangup(call_id, reason, drain=drain)
+    except Exception as exc:  # the call may already have ended remotely
+        logger.debug(f"hangup for {call_id} not applied: {exc}")
 
 
-async def _wait_for_terminal(events: AsyncIterator[CallEvent]) -> CallEvent:
+async def _wait_for_media(
+    events: AsyncIterator[CallEvent], record: ConversationRecord
+) -> CallEvent:
+    """Wait until RTP is ready, so nothing is sent before media can flow."""
     async for event in events:
-        if event.event in {CallEventType.HANGUP, CallEventType.FAILED}:
+        record.add_event(event.event.value.lower())
+        if event.event == CallEventType.RTP_READY or event.event in _TERMINAL:
+            return event
+    raise RuntimeError("call event stream ended before media was ready")
+
+
+async def _wait_for_terminal(
+    events: AsyncIterator[CallEvent], record: ConversationRecord
+) -> CallEvent:
+    async for event in events:
+        record.add_event(event.event.value.lower())
+        if event.event in _TERMINAL:
             return event
     raise RuntimeError("call event stream ended without terminal event")
-
-
-def _terminal_result(event: CallEvent) -> SessionResult:
-    result = (
-        SessionResultType.CALL_FAILED
-        if event.event == CallEventType.FAILED
-        else SessionResultType.REMOTE_HANGUP
-    )
-    return SessionResult(
-        call_id=event.call_id,
-        result=result,
-        reason=event.reason,
-        sip_status=event.sip_status,
-    )

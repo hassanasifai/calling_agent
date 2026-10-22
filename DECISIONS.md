@@ -52,3 +52,66 @@ Status: accepted with benchmark and license gates, 2026-10-23.
 
 Model choice is provisional until Urdu accuracy, first-token latency and
 concurrent-call benchmarks run on the target Windows Server.
+
+## ADR-004: Deterministic call policy; the LLM only acknowledges
+
+Status: accepted, 2026-10-23.
+
+Identity confirmation, CNIC-suffix verification, disclosure of amount and due
+date, opt-out, wrong person, human handoff, payment difficulty, silence and
+closing are decided in code (`nrsp_agent/conversation/policy.py`) and spoken
+from fixed templates (`script.py`). The LLM is reached only after
+verification, for free-form acknowledgements, and receives a fresh minimal
+context (instruction, one example, the caller's last turn) — never earlier
+turns that contain customer facts.
+
+Evidence (qwen3:1.7b via Ollama): with an Urdu instruction plus full history
+(~680 prompt tokens) the model repeated the amount/date and invented an
+"online payment facility"; with the minimal English instruction (~280 tokens,
+0.25–0.5 s first token) replies were clean, but for "can I get more time?" it
+promised an extension. Hence payment-difficulty turns are scripted, and an
+output guard rejects sentences with digits, money words, commitment words
+(مہلت، رعایت، معاف…), non-Urdu script, or echoes of the caller's words.
+
+Verification accepts the four expected digits contiguously within at most six
+heard digits. Whisper was measured adding a digit from the question
+("آخری چار") and repeating the final digit; the six-digit cap stops a caller
+reciting 0–9 to cover every window (≤3 windows per attempt, 2 attempts).
+
+## ADR-005: ASR configuration is evidence-driven and conservative
+
+Status: accepted, 2026-10-23.
+
+- Whisper prompts contain no intent trigger words. Prompts with "اللہ حافظ"
+  and "نمائندہ" were measured making Whisper hallucinate those words, which
+  ended calls as goodbye/handoff. Repetition loops ("X، X، X، X") are treated
+  as unclear, never as intents.
+- A digits-only prompt is applied only while the CNIC suffix is requested:
+  after G.711 A-law it turned "چارڈ، ماد، چیساہر" into "چار، پانچ، چھ، سات";
+  applied elsewhere it makes Whisper invent digits. It never contains the
+  customer's own digits.
+- Decoding is bounded (temperature 0, no conditioning, 96-token cap). The
+  faster-whisper defaults looped and re-decoded up to six times: ~40 s per
+  segment on CPU; bounded decoding measured 1.9–2.9 s.
+- VAD `stop_secs` 0.5 (0.3 split phrases at comma pauses; every fragment pays
+  Whisper's fixed ~2 s encoder cost) and turn-stop fallback 20 s (Pipecat's
+  5 s default attached late transcripts to the next turn).
+- `large-v3-turbo` on the laptop CPU took 6.6–7 s per segment and, with the
+  digit prompt, produced a wrong CNIC suffix; it remains the server/GPU
+  candidate pending a real-speech accuracy benchmark.
+
+## ADR-006: Media timing owned by Go, paced end to end
+
+Status: accepted, 2026-10-23.
+
+- The Go bridge sends a continuous 20 ms RTP stream (silence when idle) so
+  RTP timestamps track wall clock across pauses; when the process misses
+  ticks the timestamp skips the gap instead of drifting (measured 4.9 s drift
+  over 218 s on the paging laptop before; ≤5 ms after).
+- Python paces TTS to the playout clock with an 80 ms lead (Pipecat's base
+  output transport does not pace; Piper runs ~18× real time and overflowed
+  the bridge queue). Barge-in sends `clear_audio`; the closing line uses a
+  drained hangup so the goodbye is not cut.
+- The bridge opts out of Windows power throttling and runs at above-normal
+  priority; it fails a call after `NRSP_RTP_TIMEOUT_SECONDS` without inbound
+  RTP, and reads each decoded RTP packet regardless of the remote ptime.

@@ -17,3 +17,4 @@ data/*.csv
 *.pcm
 *.wav
 
+!tests/fixtures/caller/*.wav

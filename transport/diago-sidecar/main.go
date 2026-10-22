@@ -13,6 +13,7 @@ func main() {
 		slog.Error("invalid configuration", "error", err)
 		os.Exit(2)
 	}
+	configureProcessForMedia()
 	mediaBridge, err := newBridge(cfg)
 	if err != nil {
 		slog.Error("failed to initialize media bridge", "error", err)

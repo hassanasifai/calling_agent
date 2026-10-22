@@ -23,6 +23,16 @@ import (
 
 var safeID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
 
+var errRTPTimeout = errors.New("rtp_timeout")
+
+const (
+	rtpFrameDuration = 20 * time.Millisecond
+	// 10 s of 8 kHz PCM16; the Python sender paces to a small lead, so this
+	// bound only protects the bridge from a misbehaving controller.
+	maxPlayoutBytes = 160_000
+	maxDrainWait    = 10 * time.Second
+)
+
 type bridge struct {
 	cfg        config
 	diago      *diago.Diago
@@ -34,12 +44,14 @@ type bridge struct {
 }
 
 type callSession struct {
-	bridge  *bridge
-	owner   *clientConn
-	callID  string
-	ctx     context.Context
-	cancel  context.CancelFunc
-	audioCh chan []byte
+	bridge     *bridge
+	owner      *clientConn
+	callID     string
+	ctx        context.Context
+	cancel     context.CancelFunc
+	playout    *playoutBuffer
+	lastRx     atomic.Int64
+	clockSkips atomic.Int64
 
 	mu          sync.Mutex
 	dialog      *diago.DialogClientSession
@@ -185,9 +197,11 @@ func (b *bridge) handleCommand(ctx context.Context, client *clientConn, request 
 	case "start_call":
 		return b.startCall(ctx, client, request)
 	case "hangup":
-		return b.hangup(request.CallID, request.Reason)
+		return b.hangup(request.CallID, request.Reason, request.Drain)
 	case "send_audio":
 		return b.sendAudio(request)
+	case "clear_audio":
+		return b.clearAudio(request.CallID)
 	default:
 		return errors.New("unknown_command")
 	}
@@ -227,14 +241,14 @@ func (b *bridge) startCall(parent context.Context, client *clientConn, request c
 		callID:  request.CallID,
 		ctx:     callCtx,
 		cancel:  cancel,
-		audioCh: make(chan []byte, 64),
+		playout: newPlayoutBuffer(maxPlayoutBytes),
 	}
 	b.calls[request.CallID] = session
 	go session.run(request.Number)
 	return nil
 }
 
-func (b *bridge) hangup(callID string, reason string) error {
+func (b *bridge) hangup(callID string, reason string, drain bool) error {
 	session := b.getCall(callID)
 	if session == nil {
 		return errors.New("call_not_found")
@@ -245,7 +259,44 @@ func (b *bridge) hangup(callID string, reason string) error {
 	session.mu.Lock()
 	session.localReason = reason
 	session.mu.Unlock()
+	if drain {
+		go session.cancelAfterDrain(maxDrainWait)
+		return nil
+	}
 	session.cancel()
+	return nil
+}
+
+// cancelAfterDrain lets queued closing speech reach the caller before BYE.
+func (s *callSession) cancelAfterDrain(maxWait time.Duration) {
+	deadline := time.NewTimer(maxWait)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for s.playout.len() > 0 {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-deadline.C:
+			s.cancel()
+			return
+		case <-ticker.C:
+		}
+	}
+	// The final frame has been taken but may still be on the media clock.
+	select {
+	case <-s.ctx.Done():
+	case <-time.After(2 * rtpFrameDuration):
+	}
+	s.cancel()
+}
+
+func (b *bridge) clearAudio(callID string) error {
+	session := b.getCall(callID)
+	if session == nil {
+		return errors.New("call_not_found")
+	}
+	session.playout.clear()
 	return nil
 }
 
@@ -267,12 +318,7 @@ func (b *bridge) sendAudio(request command) error {
 	if !ready {
 		return errors.New("rtp_not_ready")
 	}
-	select {
-	case session.audioCh <- pcm:
-		return nil
-	default:
-		return errors.New("audio_queue_full")
-	}
+	return session.playout.push(pcm)
 }
 
 func (b *bridge) getCall(callID string) *callSession {
@@ -354,11 +400,14 @@ func (s *callSession) run(number string) {
 	s.mu.Lock()
 	s.pcmWriter = pcmWriter
 	s.mu.Unlock()
+	s.lastRx.Store(time.Now().UnixNano())
 	s.emit("RTP_READY", "", 0, codec.Name)
 
-	mediaErr := make(chan error, 2)
-	go s.readPCM(pcmReader, int(codec.SamplesPCM(16)), int(codec.SampleRate), mediaErr)
-	go s.writePCM(int(codec.SamplesPCM(16)), codec.SampleDur, mediaErr)
+	mediaErr := make(chan error, 3)
+	frameBytes := int(codec.SamplesPCM(16))
+	go s.readPCM(pcmReader, int(codec.SampleRate), mediaErr)
+	go s.writePCM(pcmWriter, med.RTPPacketWriter, frameBytes, mediaErr)
+	go s.watchRTP(s.bridge.cfg.RTPTimeout, mediaErr)
 
 	terminalReason := "remote_hangup"
 	select {
@@ -367,17 +416,40 @@ func (s *callSession) run(number string) {
 		s.hangupDialog()
 	case <-dialog.Context().Done():
 		terminalReason = "remote_hangup"
-	case <-mediaErr:
+	case err := <-mediaErr:
 		select {
 		case <-dialog.Context().Done():
 			terminalReason = "remote_hangup"
 		default:
-			s.emit("RTP_LOST", "media_io_failed", 0, "")
 			terminalReason = "media_io_failed"
+			if errors.Is(err, errRTPTimeout) {
+				terminalReason = "rtp_timeout"
+			}
+			s.emit("RTP_LOST", terminalReason, 0, "")
 			s.hangupDialog()
 		}
 	}
+	if skipped := s.clockSkips.Load(); skipped > 0 {
+		slog.Warn("media clock re-aligned after scheduling stalls", "skipped_frames", skipped)
+	}
 	s.finish("HANGUP", terminalReason)
+}
+
+// watchRTP fails the call when the far end stops sending media without a BYE.
+func (s *callSession) watchRTP(timeout time.Duration, result chan<- error) {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case now := <-ticker.C:
+			if now.Sub(time.Unix(0, s.lastRx.Load())) > timeout {
+				reportMediaError(result, errRTPTimeout)
+				return
+			}
+		}
+	}
 }
 
 func setupPCM(med *diago.DialogMedia) (io.Reader, io.Writer, media.Codec, error) {
@@ -405,17 +477,20 @@ func setupPCM(med *diago.DialogMedia) (io.Reader, io.Writer, media.Codec, error)
 	return decoder, encoder, readerProps.Codec, nil
 }
 
-func (s *callSession) readPCM(reader io.Reader, frameBytes int, sampleRate int, result chan<- error) {
-	buffer := make([]byte, frameBytes)
+// readPCM forwards each decoded RTP packet. The decoder returns one packet per
+// Read, so the buffer is sized for any remote ptime rather than 20 ms only.
+func (s *callSession) readPCM(reader io.Reader, sampleRate int, result chan<- error) {
+	buffer := make([]byte, 2*media.RTPBufSize)
 	for {
-		n, err := io.ReadFull(reader, buffer)
+		n, err := reader.Read(buffer)
 		if err != nil {
 			reportMediaError(result, err)
 			return
 		}
-		if n == 0 {
+		if n == 0 || n%2 != 0 {
 			continue
 		}
+		s.lastRx.Store(time.Now().UnixNano())
 		message := audioMessage{
 			Type:        "audio",
 			CallID:      s.callID,
@@ -432,42 +507,33 @@ func (s *callSession) readPCM(reader io.Reader, frameBytes int, sampleRate int, 
 	}
 }
 
-func (s *callSession) writePCM(frameBytes int, frameDuration time.Duration, result chan<- error) {
-	nextWrite := time.Now()
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case pcm := <-s.audioCh:
-			for offset := 0; offset < len(pcm); offset += frameBytes {
-				now := time.Now()
-				if nextWrite.Before(now.Add(-frameDuration)) {
-					nextWrite = now
-				}
-				if wait := time.Until(nextWrite); wait > 0 {
-					timer := time.NewTimer(wait)
-					select {
-					case <-s.ctx.Done():
-						timer.Stop()
-						return
-					case <-timer.C:
-					}
-				}
-				end := offset + frameBytes
-				frame := make([]byte, frameBytes)
-				if end > len(pcm) {
-					end = len(pcm)
-				}
-				copy(frame, pcm[offset:end])
-				s.mu.Lock()
-				writer := s.pcmWriter
-				s.mu.Unlock()
-				if _, err := writer.Write(frame); err != nil {
-					reportMediaError(result, err)
-					return
-				}
-				nextWrite = nextWrite.Add(frameDuration)
+// writePCM sends one frame per media-clock tick for the whole call: queued
+// speech when available, otherwise silence. Diago's RTP writer blocks on its
+// 20 ms ticker and advances the RTP timestamp per packet, so a continuous
+// stream keeps timestamps aligned with wall clock across pauses.
+//
+// A starved process misses ticks (time.Ticker drops them), which would leave
+// RTP time permanently behind wall clock; measured 4.9 s over 218 s on the
+// paging demo laptop. When that happens the timestamp skips the missed
+// interval, which receivers treat as a short loss, and the clock re-aligns.
+func (s *callSession) writePCM(writer io.Writer, rtpWriter *media.RTPPacketWriter, frameBytes int, result chan<- error) {
+	frame := make([]byte, frameBytes)
+	samplesPerFrame := uint32(frameBytes / 2)
+	start := time.Now()
+	var sent int64
+	for s.ctx.Err() == nil {
+		s.playout.take(frame)
+		if _, err := writer.Write(frame); err != nil {
+			if s.ctx.Err() == nil {
+				reportMediaError(result, err)
 			}
+			return
+		}
+		sent++
+		if behind := int64(time.Since(start)/rtpFrameDuration) - sent; behind >= 3 && rtpWriter != nil {
+			rtpWriter.DelayTimestamp(uint32(behind) * samplesPerFrame)
+			sent += behind
+			s.clockSkips.Add(behind)
 		}
 	}
 }

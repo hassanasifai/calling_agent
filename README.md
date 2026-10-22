@@ -34,6 +34,27 @@ Set-Location D:\calling
 .\.venv\Scripts\python.exe scripts\benchmark_local_speech.py
 ```
 
+Offline end-to-end conversation (real Go bridge, real SIP/RTP to a loopback
+test PBX/callee, real Whisper/Qwen3/Piper; no telephone network reachable):
+
+```powershell
+# Serve the project's model store; a user-level OLLAMA_MODELS elsewhere would
+# start Ollama with no models.
+$env:OLLAMA_MODELS = 'D:\calling\data\models\ollama'; $env:OLLAMA_KEEP_ALIVE = '-1'
+Start-Process D:\Ollama\ollama.exe -ArgumentList serve -WindowStyle Hidden
+
+.\.venv\Scripts\python.exe -m nrsp_agent.devtools.loopback happy_path   # one scenario, digest
+.\.venv\Scripts\python.exe -m nrsp_agent.devtools.loopback all          # every scenario
+$env:NRSP_E2E = '1'; .\.venv\Scripts\python.exe -m pytest tests\e2e -q --no-cov
+```
+
+Per-scenario reports (transcript, outcome, RTP audit, latency, recordings)
+land in `.tmp\e2e\<scenario>\`. Caller audio fixtures are synthetic
+(`scripts\make_caller_fixtures.py`) and are not an accuracy benchmark. The
+stack needs ~3.5 GB of free RAM; on the 7.7 GB laptop, paging was measured to
+make the LLM's first token 33 s. See `docs\jazz-test-runbook.md` before any
+real call.
+
 The model benchmark downloads only local model weights into the ignored
 `data/models` directory. `config/demo.toml` is the laptop profile;
 `config/server.toml` is the starting Windows Server profile and must be sized

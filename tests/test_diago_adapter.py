@@ -133,6 +133,40 @@ async def test_send_audio_serializes_pcm(
     assert command["encoding"] == "pcm_s16le"
 
 
+async def test_hangup_drain_and_clear_audio_commands(
+    fake_bridge: tuple[FakeBridge, str, int],
+) -> None:
+    bridge, host, port = fake_bridge
+    async with DiagoTelephonyPort("test-token", host, port) as adapter:
+        await adapter.clear_audio("call-1")
+        await adapter.hangup("call-1", "conversation_complete", drain=True)
+    clear, hangup = bridge.commands[-2:]
+    assert clear["command"] == "clear_audio" and clear["call_id"] == "call-1"
+    assert hangup["command"] == "hangup" and hangup["drain"] is True
+    assert hangup["reason"] == "conversation_complete"
+
+
+def test_full_audio_queue_drops_oldest_without_failing_connection() -> None:
+    adapter = DiagoTelephonyPort("test-token")
+    queue: asyncio.Queue[AudioFrame | None] = asyncio.Queue(maxsize=2)
+    adapter._audio_queues["call-1"] = queue
+    for ms in (1, 2, 3):
+        adapter._route_message(
+            {
+                "type": "audio",
+                "call_id": "call-1",
+                "pcm_b64": base64.b64encode(b"\x00\x00").decode(),
+                "sample_rate": 8_000,
+                "channels": 1,
+                "encoding": "pcm_s16le",
+                "monotonic_ms": ms,
+            }
+        )
+    kept = [queue.get_nowait().monotonic_ms, queue.get_nowait().monotonic_ms]
+    assert kept == [2, 3]
+    assert adapter.dropped_audio_frames == 1
+
+
 async def test_rejected_command_raises(
     fake_bridge: tuple[FakeBridge, str, int],
 ) -> None:
