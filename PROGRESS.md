@@ -35,9 +35,47 @@ installment reminder with identity verification is the first profile.
 - Tests: Python 78 passed / 9 skipped (E2E opt-in, Windows-only); Go `go test
   ./...` passes (bridge + media integration incl. new DTMF reader wiring).
 
-## Currently working on
-- Nothing in flight. All local services stopped (llama-server on :18431 is
-  started on demand by `scripts/run_llm_server.sh`).
+## Currently working on — reliability + latency pass (2026-10-23, later)
+Sequential: reproduce -> diagnose -> minimal fix -> test -> measure.
+
+### Diagnosed (offline replay of recorded call audio, `scripts/replay_vad.py`)
+1. **opt_out miss = input framing bug (proven, fixed).** Pipecat's
+   `SOXRStreamAudioResampler` (HQ) emits nothing for four 20 ms frames, then a
+   1,660-sample burst. Pipecat's `VADAnalyzer._run_analyzer` scores every
+   32 ms window in a call but promotes STARTING->SPEAKING only after the
+   whole burst, so a weak last window erased a valid 3-window start. Replaying
+   the failed run's caller audio (`.tmp/e2e/opt_out/sent.wav`): the "جی ہاں"
+   at 25.7 s gave **no** speech start before, a 25.96-26.48 s segment after.
+   Fix: `DiagoInputTransport` re-frames resampled audio to 20 ms (audio is
+   byte-identical; VAD now sees <= 1 window per frame).
+2. **Residual intermittent misses = Silero reset at speech onset.** Pipecat
+   resets Silero's recurrent state every ~2 s of quiet audio; when the reset
+   coincides with the start of an answer the model's confidence stays ~0.5
+   for the whole answer (a 2 s "نہیں، یہ غلط نمبر ہے" was missed). Phase
+   dependent (±50 ms shift detects it) -> explains "intermittent". Stress
+   replay, 480 answers after a previous turn + 3-6 s gap, 10 phases, 80 noise
+   trials: conf/start 0.5/0.1 s missed 22 (0 false starts); 0.5/0.064 17 (0);
+   0.45/0.064 12 (1); **0.4/0.064 8 (1, babble clip)**; 0.35/0.064 8 (2).
+   Disabling the reset was worse (11 vs 6 misses on a 4 s-gap set); dither
+   and more frequent resets did not help. Default changed to 0.4 / 0.064 s.
+   Not fully solved: ~1.7% of answers in this stress set are still missed;
+   the engine's silence prompt ("کیا آپ میری آواز سن رہے ہیں؟") is the recovery.
+3. **Approved texts waited for the end of the LLM stream (latency, fixed).**
+   Pipecat's sentence aggregator holds a sentence ending in "؟"/"۔" until it
+   sees a following character; after an approved text nothing follows, so TTS
+   started only at LLM end. In the final run 8 of 16 turns had
+   `tts_start == llm_end`, 1.4-3 s after the action was known. Fix: the guard
+   sends approved texts as `TTSSpeakFrame` (spoken immediately); model replies
+   still stream as LLM text.
+4. **LLM prompt time is mostly a fixed per-request cost** (server log): 1 or
+   8 prompt tokens took 2.8-3.1 s, 87 tokens 2.2 s. Under investigation with
+   `scripts/probe_llm_cache.py` (cache rewind on Gemma's SWA cache suspected).
+
+Baseline per-turn breakdown of the previous final run (`scripts/turn_latency.py`,
+seconds after VAD stop, n=16): ASR 2.69 P50 / 3.36 P95; LLM first token 5.01 /
+6.27; TTS start 7.28 / 9.89; first bot audio 8.07 / 10.75.
+
+Tests after fixes 1-3: Python 78 passed / 9 skipped.
 
 ## Remaining tasks (priority)
 1. Windows: pick the Ollama tag for Gemma-4-E2B (or run llama-server), confirm

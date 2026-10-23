@@ -23,6 +23,8 @@ from pipecat.transports.base_transport import BaseTransport, TransportParams
 
 from nrsp_agent.telephony.contracts import AudioFrame, TelephonyPort
 
+INPUT_FRAME_MS = 20
+
 
 class DiagoTransportParams(TransportParams):
     """Fixed media settings for the miniSIPServer G.711 call leg."""
@@ -54,6 +56,14 @@ class DiagoInputTransport(BaseInputTransport):
         self._call_id = call_id
         self._target_sample_rate = params.audio_in_sample_rate or 16_000
         self._resampler = SOXRStreamAudioResampler(quality="HQ", clear_after_secs=None)
+        # The HQ stream resampler emits ~100 ms bursts (nothing for four 20 ms
+        # frames, then 1,660 samples). Pipecat's VAD scores every 32 ms window
+        # in a burst but promotes STARTING -> SPEAKING only after the burst, so
+        # a weak window at the end of a burst erased a valid speech start:
+        # short answers ("جی ہاں") produced no turn. Re-framing to 20 ms keeps
+        # the audio identical and gives the VAD at most one window per frame.
+        self._frame_bytes = self._target_sample_rate * 2 * INPUT_FRAME_MS // 1000
+        self._pending = bytearray()
         self._bridge_reader_task: asyncio.Task[None] | None = None
 
     async def start(self, frame: StartFrame) -> None:
@@ -80,20 +90,22 @@ class DiagoInputTransport(BaseInputTransport):
             pcm16 = await self._resampler.resample(
                 frame.pcm16, frame.sample_rate, self._target_sample_rate
             )
-            if pcm16:
-                await self._push_resampled(pcm16)
+            await self._push_resampled(pcm16)
         tail = await self._resampler.flush()
-        if tail:
-            await self._push_resampled(tail)
+        await self._push_resampled(tail, final=True)
 
-    async def _push_resampled(self, pcm16: bytes) -> None:
-        await self.push_audio_frame(
-            InputAudioRawFrame(
-                audio=pcm16,
-                sample_rate=self._target_sample_rate,
-                num_channels=1,
+    async def _push_resampled(self, pcm16: bytes, final: bool = False) -> None:
+        self._pending += pcm16
+        while len(self._pending) >= self._frame_bytes or (final and self._pending):
+            chunk = bytes(self._pending[: self._frame_bytes])
+            del self._pending[: self._frame_bytes]
+            await self.push_audio_frame(
+                InputAudioRawFrame(
+                    audio=chunk,
+                    sample_rate=self._target_sample_rate,
+                    num_channels=1,
+                )
             )
-        )
 
     async def _cancel_bridge_reader(self) -> None:
         if self._bridge_reader_task is not None:

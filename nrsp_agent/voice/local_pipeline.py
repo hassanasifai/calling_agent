@@ -75,6 +75,10 @@ class LocalVoicePipelineSettings(BaseModel):
     # llama-server (Ubuntu). Both cache the static system-prompt prefix.
     ollama_base_url: str = "http://127.0.0.1:11434/v1"
     llm_max_tokens: int = Field(default=80, ge=16, le=512)
+    # Process the next turn's known prompt prefix while the bot speaks
+    # (ConversationController._prefill_next_turn); any server that caches
+    # prompt prefixes (llama.cpp, Ollama) benefits.
+    llm_prefill: bool = True
     llm_temperature: float = Field(default=0.2, ge=0.0, le=1.5)
     # Lexical fallback if the model has not produced a label by then.
     llm_understanding_timeout_seconds: float = Field(default=8.0, ge=1.0, le=30.0)
@@ -84,10 +88,14 @@ class LocalVoicePipelineSettings(BaseModel):
     # transcribes poorly and that each pay Whisper's fixed ~2 s encoder cost.
     vad_stop_secs: float = Field(default=0.5, ge=0.1, le=1.5)
     # Short answers ("جی ہاں", ~0.9 s) never reached SPEAKING at Pipecat's
-    # 0.7 / 0.2 s defaults over G.711; 0.5 / 0.1 s detected 16/16 caller
-    # fixtures with 0/8 false triggers on the noise clips.
-    vad_confidence: float = Field(default=0.5, ge=0.2, le=0.95)
-    vad_start_secs: float = Field(default=0.1, ge=0.05, le=0.5)
+    # 0.7 / 0.2 s defaults over G.711. Pipecat also resets Silero's state
+    # every ~2 s of quiet; a reset that lands on a speech onset leaves the
+    # model's confidence near 0.5 for the whole answer. Replay of 480 answers
+    # after a previous turn and a 3-6 s gap (scripts/replay_vad.py): 0.5 /
+    # 0.1 s missed 22, 0.4 / 0.064 s missed 8; noise false starts 0 -> 1/80
+    # (babble only). 0.35 missed as many with more false starts.
+    vad_confidence: float = Field(default=0.4, ge=0.2, le=0.95)
+    vad_start_secs: float = Field(default=0.064, ge=0.03, le=0.5)
     user_speech_timeout_seconds: float = Field(default=0.6, ge=0.2, le=3.0)
     # Fallback that closes a turn when no transcript arrives. It must exceed
     # worst-case ASR latency, or a late transcript is attributed to the next
@@ -405,11 +413,24 @@ def build_local_voice_agent(
             empty_user_turn=None,
         ),
     )
+
+    async def prefill(messages: list[dict]) -> None:
+        body = {
+            "model": settings.llm_model,
+            "messages": messages,
+            "max_tokens": 1,
+            "reasoning_effort": "none",
+            **LLM_EXTRA_BODY,
+        }
+        url = f"{settings.ollama_base_url}/chat/completions"
+        await asyncio.to_thread(_post_json, url, body)
+
     controller = ConversationController(
         engine,
         record,
         understanding_timeout_s=settings.llm_understanding_timeout_seconds,
         finish_on_silence=settings.finish_on_silence_action,
+        prefill=prefill if settings.llm_prefill else None,
     )
     user_aggregator = aggregators.user()
 

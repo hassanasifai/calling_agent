@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from loguru import logger
@@ -121,6 +122,7 @@ class ConversationController(FrameProcessor):
         record: ConversationRecord,
         understanding_timeout_s: float = 8.0,
         finish_on_silence: str = "",
+        prefill: Callable[[list[dict]], Awaitable[None]] | None = None,
         **kwargs: object,
     ) -> None:
         super().__init__(**kwargs)
@@ -136,6 +138,11 @@ class ConversationController(FrameProcessor):
         # One LLM request in flight at a time; responses carry its id.
         self.request_id = 0
         self._awaiting_response = False
+        # Optional: send the next request's known prefix to the LLM server
+        # while the bot speaks (see _prefill_next_turn).
+        self._prefill = prefill
+        self._prefill_task: asyncio.Task | None = None
+        self._prefill_messages: list[dict] | None = None
 
     def system_message(self) -> dict:
         return {"role": "system", "content": self.engine.system_prompt()}
@@ -240,6 +247,34 @@ class ConversationController(FrameProcessor):
         said = {"action": action, "value": "", "say": self.redact(text)}
         content = raw or json.dumps(said, ensure_ascii=False)
         self._history.append({"role": "assistant", "content": content})
+        self._prefill_next_turn()
+
+    def _prefill_next_turn(self) -> None:
+        """Have the server process everything the next request will share
+        (history, the model's last output, the call-state prefix of the next
+        turn message) while the bot speaks, so the caller's turn pays only for
+        its own words. Measured on 5 CPU threads: ~55 of ~85 per-turn prompt
+        tokens, first token 2.5 s -> 0.9 s. One prefill at a time, always for
+        the latest state; a real request that arrives meanwhile simply queues
+        behind it on the server and reuses what it processed."""
+        if self._prefill is None or self.engine.closed:
+            return
+        prefix = {"role": "user", "content": self.engine.turn_prefix(self.redact)}
+        self._prefill_messages = [
+            self.system_message(),
+            *self._history[-HISTORY_MESSAGES:],
+            prefix,
+        ]
+        if self._prefill_task is None or self._prefill_task.done():
+            self._prefill_task = asyncio.get_running_loop().create_task(
+                self._run_prefill()
+            )
+
+    async def _run_prefill(self) -> None:
+        assert self._prefill is not None
+        while self._prefill_messages is not None:
+            messages, self._prefill_messages = self._prefill_messages, None
+            await self._prefill(messages)
 
     def redact(self, text: str) -> str:
         # Private call data never enters the model's context.
@@ -290,6 +325,9 @@ class ConversationController(FrameProcessor):
 
     async def cleanup(self) -> None:
         self._cancel_watchdog()
+        self._prefill_messages = None
+        if self._prefill_task and not self._prefill_task.done():
+            self._prefill_task.cancel()
         await super().cleanup()
 
 
@@ -456,7 +494,15 @@ class LLMOutputGuard(FrameProcessor):
         assert self._controller is not None
         self._decision = await self._controller.resolve(action, value, self._request)
         if self._decision is not None and self._decision.speak:
-            await self._say(self._decision.speak)
+            if self._decision.use_model_reply:
+                await self._say(self._decision.speak)
+            else:
+                # The rest of the model output is dropped, so this text is the
+                # whole reply. As LLM text, Pipecat's sentence aggregator held
+                # it until the stream ended (it waits for a character after
+                # the final "؟"/"۔"): 1.4-2 s of leftover JSON per turn.
+                self._spoken.append(self._decision.speak)
+                await self.push_frame(TTSSpeakFrame(self._decision.speak))
 
     async def _finish(self) -> None:
         if not self._resolved:

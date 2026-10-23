@@ -231,6 +231,13 @@ class CallEngine:
         """Per-turn dynamic context, kept short: every token here is processed
         on each turn (measured ~43 prompt tokens/s for a 2B model on 4 CPU
         threads). Allowed actions are enforced by the schema, not listed."""
+        parts = [f"Knowledge: {s[:400]}" for s in self.knowledge.search(caller_text)]
+        parts.append(f"Caller: {caller_text}")
+        return self.turn_prefix(redact) + "\n".join(parts)
+
+    def turn_prefix(self, redact) -> str:
+        """The part of the next turn message known before the caller speaks
+        (call state only), so the LLM server can process it in advance."""
         done = ", ".join(sorted(self.flags)) or "nothing yet"
         parts = [f"[done: {done}]"]
         if self.pending_ask:
@@ -240,10 +247,7 @@ class CallEngine:
                 "[yes/no question pending: affirm if the caller means yes,"
                 " reject if no]"
             )
-        for snippet in self.knowledge.search(caller_text):
-            parts.append(f"Knowledge: {snippet[:400]}")
-        parts.append(f"Caller: {caller_text}")
-        return "\n".join(parts)
+        return "\n".join(parts) + "\n"
 
     # ----- decisions ------------------------------------------------------
     def on_model(self, action: str, value: str, caller_text: str) -> Decision | None:

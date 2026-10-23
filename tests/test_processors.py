@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -112,11 +113,11 @@ def model_json(action: str, say: str = "", value: str = "") -> str:
 class Call:
     """Controller + guard wired as in the pipeline, with a scripted model."""
 
-    def __init__(self, timeout_s: float = 6.0) -> None:
+    def __init__(self, timeout_s: float = 6.0, prefill=None) -> None:
         self.engine = build_engine(NRSP_PROFILE, TEST_CALL_DATA)
         self.record = ConversationRecord()
         self.controller = ConversationController(
-            self.engine, self.record, understanding_timeout_s=timeout_s
+            self.engine, self.record, understanding_timeout_s=timeout_s, prefill=prefill
         )
         self.guard = LLMOutputGuard(self.record, self.controller)
         self.up = Capture(self.controller)
@@ -131,10 +132,11 @@ class Call:
         if model_output is not None:
             chunks = [model_output[i : i + 5] for i in range(0, len(model_output), 5)]
             await stream_llm(self.guard, chunks)
+        # Approved texts go to TTS as TTSSpeakFrame, model replies as LLM text.
         return [
             f.text.strip()
             for f in self.out.frames[before:]
-            if isinstance(f, LLMTextFrame)
+            if isinstance(f, LLMTextFrame | TTSSpeakFrame)
         ]
 
     def sent_messages(self) -> list[dict]:
@@ -300,3 +302,26 @@ async def test_answer_to_a_superseded_request_is_never_applied() -> None:
 
     assert call.engine.pending_ask.startswith("کیا میری بات")  # nothing applied
     assert "stale_model_output_dropped" in [e for _, e in call.record.events]
+
+
+@pytest.mark.asyncio
+async def test_prefill_is_an_exact_prefix_of_the_next_request() -> None:
+    prefills: list[list[dict]] = []
+
+    async def prefill(messages: list[dict]) -> None:
+        prefills.append(messages)
+
+    call = Call(prefill=prefill)
+    await call.controller.greet()
+    await asyncio.sleep(0)
+    await call.turn("جی میں ہی ہوں", model_json("confirm_identity"))
+    await asyncio.sleep(0)
+    sent = call.sent_messages()
+    # The prefill after the greeting shares everything but the caller's words.
+    first = prefills[0]
+    assert first[:-1] == sent[:-1]
+    assert sent[-1]["content"].startswith(first[-1]["content"])
+    assert "جی میں ہی ہوں" not in first[-1]["content"]
+    # After the model's answer the next prefill covers it too.
+    await call.turn("چار پانچ چھ سات", model_json("verify_cnic"))
+    assert prefills[1][:-1] == call.sent_messages()[:-1]
