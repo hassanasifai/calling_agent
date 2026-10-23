@@ -10,7 +10,7 @@ from nrsp_agent.agent.engine import AFFIRM, REJECT, CallEngine
 from nrsp_agent.agent.knowledge import KnowledgeBase
 from nrsp_agent.agent.profile import AgentProfile, load_profile
 from nrsp_agent.agent.textnorm import extract_digits
-from nrsp_agent.devtools.loopback import NRSP_PROFILE, TEST_CALL_DATA
+from nrsp_agent.devtools.fixtures import NRSP_PROFILE, TEST_CALL_DATA
 
 CLINIC = Path("tests/fixtures/profiles/clinic_reminder")
 CLINIC_DATA = {
@@ -111,21 +111,36 @@ def test_record_action_stores_structured_field() -> None:
 
 
 @pytest.mark.parametrize(
-    ("action", "outcome"),
+    ("action", "outcome", "confirmed"),
     [
-        ("opt_out", "opted_out"),
-        ("human_handoff", "handoff_requested"),
-        ("callback", "callback_requested"),
-        ("wrong_person", "wrong_person"),
-        ("finish", "caller_ended"),
+        ("opt_out", "opted_out", True),
+        ("human_handoff", "handoff_requested", True),
+        ("callback", "callback_requested", False),
+        ("wrong_person", "wrong_person", True),
+        ("finish", "caller_ended", False),
     ],
 )
-def test_end_actions_before_verification(action: str, outcome: str) -> None:
+def test_end_actions_before_verification(
+    action: str, outcome: str, confirmed: bool
+) -> None:
     engine = nrsp()
     decision = engine.on_model(action, "", "...")
+    if confirmed:  # profile asks before this irreversible ending
+        assert not decision.end_call and decision.speak.endswith("؟")
+        decision = engine.on_model(AFFIRM, "", "جی ہاں")
 
     assert decision.end_call and engine.outcome == outcome
     assert engine.on_model("reply", "", "hello") is None
+
+
+def test_rejected_end_confirmation_returns_to_the_question() -> None:
+    engine = nrsp()
+    engine.on_model("wrong_person", "", "aap kaun?")
+    back = engine.on_model(REJECT, "", "nahi nahi main hi hoon")
+
+    assert not back.end_call and engine.outcome == "in_progress"
+    assert back.speak == "کیا میری بات احمد علی سے ہو رہی ہے؟"
+    assert AFFIRM not in engine.allowed_actions()
 
 
 def test_finish_after_objective_is_completed() -> None:
@@ -158,19 +173,34 @@ def test_schema_allows_only_actions_available_this_turn() -> None:
 
     def enum() -> list[str]:
         schema = engine.response_schema()
-        return [n for b in schema["anyOf"] for n in b["properties"]["action"]["enum"]]
+        branches = schema.get("anyOf", [schema])
+        return [n for b in branches for n in b["properties"]["action"]["enum"]]
 
     assert enum()[0] == "reply" and "confirm_identity" in enum()
     assert "verify_cnic" not in enum() and AFFIRM not in enum()
     assert "tell_installment" not in enum()  # gated until verified
-    engine.on_model("confirm_identity", "", "جی")
-    engine.on_model("verify_cnic", "", "چار پانچ چھ سات")
-    assert AFFIRM in enum() and REJECT in enum()
     talking, silent = engine.response_schema()["anyOf"]
     assert list(talking["properties"]) == ["action", "value", "say"]
-    assert "reply" in talking["properties"]["action"]["enum"]
-    assert AFFIRM in silent["properties"]["action"]["enum"]
     assert silent["properties"]["say"]["maxLength"] == 0
+    engine.on_model("confirm_identity", "", "جی")
+    engine.on_model("verify_cnic", "", "چار پانچ چھ سات")
+    # While the read-back awaits yes/no, only answers, a new attempt and
+    # safety exits are possible.
+    assert set(enum()) == {AFFIRM, REJECT, "verify_cnic", "opt_out", "human_handoff"}
+
+
+def test_unrelated_action_during_confirmation_repeats_the_question() -> None:
+    engine = nrsp()
+    engine.on_model("confirm_identity", "", "جی")
+    readback = engine.on_model("verify_cnic", "", "چار پانچ چھ سات")
+    again = engine.on_model("finish", "", "جی")
+
+    assert not again.end_call and again.speak.endswith(readback.speak)
+
+
+def test_roman_urdu_digits_are_parsed() -> None:
+    assert extract_digits("char paanch chay saat") == "4567"
+    assert extract_digits("ek sifar nau aath") == "1098"
 
 
 def test_second_profile_runs_on_the_same_engine() -> None:

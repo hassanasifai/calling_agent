@@ -69,7 +69,10 @@ class CallEngine:
         self._values = _Formatter({**self.call_data, **texts})
         self._turns = self._silences = self._failed = 0
         self._attempts: dict[str, int] = {}
+        # A pending confirmation: (verify action, digits read back) or
+        # (end action, "") awaiting the caller's affirm/reject.
         self._candidate: tuple[Action, str] | None = None
+        self._return_question = ""
         self._verify_question = ""
         # The greeting's question is pending from the start of the call.
         self.pending_ask = self.render(self.profile.greeting_ask)
@@ -94,14 +97,25 @@ class CallEngine:
     def action_names(self) -> list[str]:
         names = [REPLY, *self._actions]
         if any(
-            a.kind == ActionKind.VERIFY and a.readback for a in self.profile.actions
+            (a.kind == ActionKind.VERIFY and a.readback) or a.confirm
+            for a in self.profile.actions
         ):
             names += [AFFIRM, REJECT]
         return names
 
     def allowed_actions(self) -> list[str]:
-        names = [REPLY] + [a.name for a in self._available()]
-        return names + [AFFIRM, REJECT] if self._candidate else names
+        if self._candidate:
+            # A yes/no confirmation is pending: accept the answer, a new
+            # attempt at the same check, or a profile safety exit only.
+            pending, _ = self._candidate
+            keep = [
+                a.name
+                for a in self._available()
+                if (a.name in self.profile.safety_actions and a is not pending)
+                or (pending.kind == ActionKind.VERIFY and a is pending)
+            ]
+            return [AFFIRM, REJECT, *keep]
+        return [REPLY] + [a.name for a in self._available()]
 
     def response_schema(self) -> dict:
         """JSON schema for constrained decoding of this turn.
@@ -127,10 +141,17 @@ class CallEngine:
                 "additionalProperties": False,
             }
 
-        branches = [branch(talking, {"type": "string", "maxLength": 300})]
+        branches = []
+        if talking:
+            branches.append(branch(talking, {"type": "string", "maxLength": 300}))
         if silent:
             branches.append(branch(silent, {"type": "string", "maxLength": 0}))
         return branches[0] if len(branches) == 1 else {"anyOf": branches}
+
+    def needs_value(self, name: str) -> bool:
+        """Whether the action uses the model's ``value`` (record actions)."""
+        action = self._actions.get(name)
+        return action is not None and action.kind == ActionKind.RECORD
 
     def _model_speaks(self, name: str) -> bool:
         action = self._actions.get(name)
@@ -192,14 +213,18 @@ class CallEngine:
         )
 
     def turn_message(self, caller_text: str, redact) -> str:
-        """Per-turn dynamic context, kept short to limit prompt processing."""
-        allowed = self.allowed_actions()
-        parts = [
-            f"Done: {', '.join(sorted(self.flags)) or 'nothing yet'}."
-            f" Allowed actions now: {', '.join(allowed)}."
-        ]
+        """Per-turn dynamic context, kept short: every token here is processed
+        on each turn (measured ~43 prompt tokens/s for a 2B model on 4 CPU
+        threads). Allowed actions are enforced by the schema, not listed."""
+        done = ", ".join(sorted(self.flags)) or "nothing yet"
+        parts = [f"[done: {done}]"]
         if self.pending_ask:
-            parts.append(f"You last asked: {redact(self.pending_ask)}")
+            parts[0] = f"[done: {done} | you asked: {redact(self.pending_ask)}]"
+        if self._candidate:
+            parts.append(
+                "[yes/no question pending: affirm if the caller means yes,"
+                " reject if no]"
+            )
         for snippet in self.knowledge.search(caller_text):
             parts.append(f"Knowledge: {snippet[:400]}")
         parts.append(f"Caller: {caller_text}")
@@ -218,6 +243,9 @@ class CallEngine:
             )
         if self._candidate and action in (AFFIRM, REJECT):
             return self._resolve_candidate(action == AFFIRM)
+        if self._candidate and action not in self.allowed_actions():
+            # Not an answer to the confirmation: ask it again.
+            return self._approved(self.profile.repeat_request, self.pending_ask)
         chosen = self._actions.get(action)
         if chosen is None or chosen not in self._available():
             return self._model_reply()
@@ -225,12 +253,12 @@ class CallEngine:
             return self._verify(chosen, caller_text)
         self._candidate = None
         if chosen.kind == ActionKind.END:
-            outcome = chosen.outcome
-            if chosen.outcome_if_incomplete and not set(self.profile.completion) <= (
-                self.flags
-            ):
-                outcome = chosen.outcome_if_incomplete
-            return self._end(outcome, chosen.say)
+            if chosen.confirm:
+                self._candidate = (chosen, "")
+                self._return_question = self.pending_ask
+                self.pending_ask = self.render(chosen.confirm)
+                return Decision(speak=self.pending_ask)
+            return self._finish(chosen)
         self.flags.update(chosen.sets)
         if chosen.kind == ActionKind.RECORD:
             self.fields[chosen.field] = (value or caller_text).strip()[:200]
@@ -317,10 +345,23 @@ class CallEngine:
             return Decision(speak=self.pending_ask)
         return self._check(action, digits)
 
+    def _finish(self, action: Action) -> Decision:
+        outcome = action.outcome
+        if action.outcome_if_incomplete and not set(self.profile.completion) <= (
+            self.flags
+        ):
+            outcome = action.outcome_if_incomplete
+        return self._end(outcome, action.say)
+
     def _resolve_candidate(self, confirmed: bool) -> Decision:
         assert self._candidate is not None
         action, digits = self._candidate
         self._candidate = None
+        if action.kind == ActionKind.END:
+            if confirmed:
+                return self._finish(action)
+            question = self._return_question.replace("{", "{{").replace("}", "}}")
+            return self._approved("", question)
         if not confirmed:
             return self._approved(action.say_unclear, self._verify_ask(action))
         return self._check(action, digits)

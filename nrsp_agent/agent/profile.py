@@ -41,6 +41,9 @@ class Action(BaseModel):
     # Approved question that the agent asks next and waits on.
     ask: str = ""
     outcome: str = ""
+    # END only: approved question asked first; the call ends only if the
+    # caller confirms (guards against misunderstood, irreversible endings).
+    confirm: str = ""
     # END only: outcome when the profile's completion flags are not all set.
     outcome_if_incomplete: str = ""
     field: str = ""
@@ -90,6 +93,9 @@ class AgentProfile(BaseModel):
     rules: tuple[str, ...] = ()
     # Call-data fields the model may see; all other fields stay private.
     public_fields: tuple[str, ...] = ()
+    # Actions that stay available even while a yes/no confirmation is
+    # pending (e.g. opt-out, human handoff); others wait for the answer.
+    safety_actions: tuple[str, ...] = ()
     # Flags that make an END action count as a completed task.
     completion: tuple[str, ...] = ()
     greeting: str

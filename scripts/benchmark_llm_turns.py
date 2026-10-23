@@ -23,7 +23,7 @@ import numpy as np
 from nrsp_agent.agent import build_engine
 from nrsp_agent.agent.engine import AFFIRM, CallEngine
 from nrsp_agent.conversation.processors import screen_sentence
-from nrsp_agent.devtools.loopback import NRSP_PROFILE, TEST_CALL_DATA
+from nrsp_agent.devtools.fixtures import NRSP_PROFILE, TEST_CALL_DATA
 
 LLAMA = Path(".cache/llama.cpp/b11516/llama-b11516/llama-server")
 
@@ -54,7 +54,7 @@ def start_server(binary: Path, model: Path, port: int, threads: int):
             "-tb",
             str(threads),
             "-c",
-            "4096",
+            "8192",
             "-np",
             "1",
             "--jinja",

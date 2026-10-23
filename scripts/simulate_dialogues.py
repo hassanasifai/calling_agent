@@ -34,7 +34,7 @@ from nrsp_agent.conversation.processors import (  # noqa: E402
     ConversationRecord,
     LLMOutputGuard,
 )
-from nrsp_agent.devtools.loopback import NRSP_PROFILE, TEST_CALL_DATA  # noqa: E402
+from nrsp_agent.devtools.fixtures import NRSP_PROFILE, TEST_CALL_DATA  # noqa: E402
 
 # Unseen phrasings; none is used in any prompt. (caller turns, outcome, verified)
 DIALOGUES: list[tuple[str, list[str], str, bool]] = [
@@ -73,6 +73,7 @@ DIALOGUES: list[tuple[str, list[str], str, bool]] = [
             "جی",
             "اس بار سیلاب کی وجہ سے سب کچھ تباہ ہو گیا، پیسے نہیں ہیں",
             "مجھے کسی بندے سے بات کروا دیں",
+            "جی ہاں",
         ],
         "handoff_requested",
         True,
@@ -83,7 +84,12 @@ DIALOGUES: list[tuple[str, list[str], str, bool]] = [
         "callback_requested",
         False,
     ),
-    ("not_him", ["nahi ji, ye unka number nahi hai"], "wrong_person", False),
+    (
+        "not_him",
+        ["nahi ji, ye unka number nahi hai", "جی، وہ یہاں نہیں ہوتے"],
+        "wrong_person",
+        False,
+    ),
     (
         "asks_amount_topic_change_bye",
         [
@@ -132,6 +138,7 @@ class Port:
         self.spoken: list[str] = []
         self.first_audio_s: float | None = None
         self.turn_started = 0.0
+        self.timings: list[dict] = []
 
     def attach(self, controller: ConversationController, guard: LLMOutputGuard):
         async def controller_push(frame, direction=FrameDirection.DOWNSTREAM):
@@ -184,7 +191,24 @@ class Port:
         while raw := await asyncio.to_thread(response.readline):
             line = raw.decode().strip()
             if line.startswith("data:") and not line.endswith("[DONE]"):
-                delta = json.loads(line[5:])["choices"][0]["delta"]
+                chunk = json.loads(line[5:])
+                if "timings" in chunk:
+                    t = chunk["timings"]
+                    self.timings.append(
+                        {
+                            k: round(t.get(k, 0))
+                            for k in (
+                                "cache_n",
+                                "prompt_n",
+                                "prompt_ms",
+                                "predicted_n",
+                                "predicted_ms",
+                            )
+                        }
+                    )
+                if not chunk.get("choices"):
+                    continue
+                delta = chunk["choices"][0]["delta"]
                 if text := delta.get("content"):
                     await guard.process_frame(LLMTextFrame(text=text), down)
         await guard.process_frame(LLMFullResponseEndFrame(), down)
@@ -193,7 +217,9 @@ class Port:
 async def run_dialogue(port: int, turns: list[str]) -> dict:
     engine = build_engine(NRSP_PROFILE, TEST_CALL_DATA)
     record = ConversationRecord()
-    controller = ConversationController(engine, record, understanding_timeout_s=30)
+    controller = ConversationController(
+        engine, record, understanding_timeout_s=30, finish_on_silence="finish"
+    )
     guard = LLMOutputGuard(record, controller)
     io = Port(port)
     io.attach(controller, guard)
@@ -222,6 +248,13 @@ async def run_dialogue(port: int, turns: list[str]) -> dict:
             leaked |= any(s in reply for s in secrets)
         latencies.append(round(io.first_audio_s or 0.0, 2))
         transcript.append({"caller": text, "bot": reply, "first_text_s": latencies[-1]})
+    if not engine.closed:
+        # A real call goes quiet after the caller's last words.
+        io.spoken = []
+        await controller.handle_silence()
+        transcript.append(
+            {"caller": "<silence>", "bot": " ".join(io.spoken), "first_text_s": 0.0}
+        )
     await controller.cleanup()
     return {
         "outcome": engine.outcome,
@@ -231,6 +264,7 @@ async def run_dialogue(port: int, turns: list[str]) -> dict:
         "labels": [e for _, e in record.events if e.startswith(("action", "model"))],
         "guard_rejections": record.guard_rejections,
         "turns": transcript,
+        "llm_timings": io.timings,
         "first_text_s": latencies,
     }
 
@@ -254,6 +288,7 @@ async def main_async(args: argparse.Namespace) -> None:
                 f"latency={result['first_text_s']}",
                 flush=True,
             )
+            print(f"    llm timings: {result['llm_timings']}")
             for turn in result["turns"]:
                 print(f"    caller: {turn['caller']}\n    bot:    {turn['bot']}")
     finally:

@@ -30,8 +30,11 @@ from pipecat.services.whisper.stt import WhisperSTTService
 from nrsp_agent.agent.engine import CallEngine, Decision
 from nrsp_agent.agent.textnorm import is_degenerate, normalize
 
-# Prior messages the model sees for in-call memory (private data redacted).
-HISTORY_MESSAGES = 8
+# In-call memory. The whole call is kept (calls are short; the engine caps
+# turns): a sliding window would change the prompt prefix every turn and
+# defeat the server's prefix cache (measured: 300-430 tokens re-processed,
+# +7-11 s per turn on CPU).
+HISTORY_MESSAGES = 64
 
 
 @dataclass
@@ -161,12 +164,12 @@ class ConversationController(FrameProcessor):
             self._record.add_event("asr_loop")
             await self._apply(self.engine.on_failure())
             return
-        messages = [
-            self.system_message(),
-            *self._history[-HISTORY_MESSAGES:],
-            {"role": "user", "content": self.engine.turn_message(text, self.redact)},
-        ]
-        self._history.append({"role": "user", "content": f"Caller: {text}"})
+        turn = {"role": "user", "content": self.engine.turn_message(text, self.redact)}
+        messages = [self.system_message(), *self._history[-HISTORY_MESSAGES:], turn]
+        # History keeps exactly what was sent (and below, exactly what the
+        # model generated) so the next request shares the server's cached
+        # prefix and only the new turn's tokens are processed.
+        self._history.append(turn)
         self._turn_text, self._turn_open = text, True
         self._cancel_watchdog()
         self._watchdog = asyncio.create_task(self._fallback_after_timeout())
@@ -189,12 +192,14 @@ class ConversationController(FrameProcessor):
             self._record.add_event(f"end_call:{self.engine.outcome}")
         return decision
 
-    def assistant_said(self, text: str, source: str, action: str = "reply") -> None:
+    def assistant_said(
+        self, text: str, source: str, action: str = "reply", raw: str = ""
+    ) -> None:
+        """Record what was spoken; ``raw`` is the model's exact output."""
         self._record.add_turn("assistant", text, source)
         said = {"action": action, "value": "", "say": self.redact(text)}
-        self._history.append(
-            {"role": "assistant", "content": json.dumps(said, ensure_ascii=False)}
-        )
+        content = raw or json.dumps(said, ensure_ascii=False)
+        self._history.append({"role": "assistant", "content": content})
 
     def redact(self, text: str) -> str:
         # Private call data never enters the model's context.
@@ -363,10 +368,16 @@ class LLMOutputGuard(FrameProcessor):
             return
         self._raw += text
         if not self._resolved:
-            action, value = _ACTION.search(self._raw), _VALUE.search(self._raw)
-            if not (action and value):
+            # Resolve as soon as the action name is complete; wait for the
+            # value only when the action records it (saves ~0.5 s on CPU).
+            action = _ACTION.search(self._raw)
+            if not action:
                 return
-            await self._resolve(action.group(1), _unescape(value.group(1)))
+            name = action.group(1)
+            value = _VALUE.search(self._raw)
+            if self._controller.engine.needs_value(name) and not value:
+                return
+            await self._resolve(name, _unescape(value.group(1)) if value else "")
         if self._decision is None or not self._decision.use_model_reply:
             return
         if self._say_from is None:
@@ -397,15 +408,17 @@ class LLMOutputGuard(FrameProcessor):
         self._decision = await self._controller.resolve(action, value)
         if self._decision is not None and self._decision.speak:
             await self._say(self._decision.speak)
-            self._controller.assistant_said(
-                self._decision.speak, "script", self._action
-            )
 
     async def _finish(self) -> None:
         if not self._resolved:
             await self._resolve(None, "")
         decision = self._decision
-        if decision is None or not decision.use_model_reply:
+        if decision is None:
+            return
+        if not decision.use_model_reply:
+            assert self._controller is not None
+            raw = self._raw.strip() if self._action != "invalid" else ""
+            self._controller.assistant_said(decision.speak, "script", self._action, raw)
             return
         await self._emit(_unescape(self._pending))
         self._pending = ""
@@ -418,7 +431,9 @@ class LLMOutputGuard(FrameProcessor):
             await self._say(engine.render(engine.profile.repeat_request))
         text = " ".join(self._spoken)
         if self._controller is not None:
-            self._controller.assistant_said(text, "llm", self._action)
+            self._controller.assistant_said(
+                text, "llm", self._action, self._raw.strip()
+            )
         else:
             self._record.add_turn("assistant", text, "llm")
         if not model_said:

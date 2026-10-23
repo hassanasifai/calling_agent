@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from nrsp_agent.agent import build_engine
+from nrsp_agent.devtools.fixtures import NRSP_PROFILE, TEST_CALL_DATA
 from nrsp_agent.session import SessionResult, run_outbound_session
 from nrsp_agent.telephony.diago import DiagoTelephonyPort
 from nrsp_agent.voice.local_pipeline import LocalVoicePipelineSettings, preload_models
@@ -30,15 +31,6 @@ ROOT = Path(__file__).resolve().parents[2]
 GO_DIR = ROOT / "transport" / "diago-sidecar"
 FIXTURES = ROOT / "tests" / "fixtures" / "caller"
 TEST_NUMBER = "9000"
-
-NRSP_PROFILE = ROOT / "config" / "profiles" / "nrsp_verification"
-# Fake test customer; never a real person.
-TEST_CALL_DATA = {
-    "customer_name": "احمد علی",
-    "cnic_last4": "4567",
-    "amount_spoken": "پانچ ہزار",
-    "due_date_spoken": "پندرہ نومبر",
-}
 
 
 @dataclass(frozen=True)

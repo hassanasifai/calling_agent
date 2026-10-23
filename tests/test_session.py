@@ -8,7 +8,7 @@ import pytest
 import nrsp_agent.session as session_module
 from nrsp_agent.agent import build_engine
 from nrsp_agent.conversation.processors import ConversationRecord
-from nrsp_agent.devtools.loopback import NRSP_PROFILE, TEST_CALL_DATA
+from nrsp_agent.devtools.fixtures import NRSP_PROFILE, TEST_CALL_DATA
 from nrsp_agent.session import SessionResultType, run_outbound_session
 from nrsp_agent.telephony.contracts import (
     AudioFrame,

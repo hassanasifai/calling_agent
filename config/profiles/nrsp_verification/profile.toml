@@ -22,9 +22,10 @@ rules = [
 ]
 public_fields = ["customer_name"]
 completion = ["verified", "installment_disclosed"]
+safety_actions = ["opt_out", "human_handoff"]
 knowledge_files = ["knowledge.md"]
 reply_forbidden_terms = ["ہزار", "لاکھ", "کروڑ", "روپے", "روپیہ", "روپیے", "فیصد",
-  "مہلت", "توسیع", "رعایت", "معاف", "جرمانہ"]
+  "مہلت", "توسیع", "رعایت", "معاف", "جرمانہ", "مزید وقت", "وقت دے"]
 max_turns = 16
 
 greeting = "السلام علیکم۔ میں این آر ایس پی کی طرف سے ایک خودکار اے آئی معاون بات کر رہا ہوں۔"
@@ -106,6 +107,7 @@ kind = "end"
 when = "the caller is not {customer_name}, it is a wrong number, or {customer_name} is not available"
 blocked_by = ["identity_confirmed"]
 outcome = "wrong_person"
+confirm = "معذرت، کیا آپ یہ بتا رہے ہیں کہ {customer_name} سے اس وقت بات نہیں ہو سکتی؟"
 say = "زحمت کے لیے معذرت۔ آپ کا شکریہ، اللہ حافظ۔"
 
 [[actions]]
@@ -113,6 +115,7 @@ name = "opt_out"
 kind = "end"
 when = "the caller does not want calls from NRSP again or wants their number removed"
 outcome = "opted_out"
+confirm = "تو کیا آپ چاہتے ہیں کہ این آر ایس پی آپ کو آئندہ کال نہ کرے؟"
 say = "جی بالکل، آپ کی درخواست نوٹ کر لی گئی ہے۔ زحمت کے لیے معذرت، اللہ حافظ۔"
 
 [[actions]]
@@ -120,6 +123,7 @@ name = "human_handoff"
 kind = "end"
 when = "the caller wants a human, officer, manager or representative"
 outcome = "handoff_requested"
+confirm = "کیا آپ چاہتے ہیں کہ ہمارا نمائندہ آپ سے رابطہ کرے؟"
 say = "جی ضرور۔ ہمارا نمائندہ جلد آپ سے رابطہ کرے گا۔ شکریہ، اللہ حافظ۔"
 
 [[actions]]

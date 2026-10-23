@@ -49,6 +49,26 @@ _DIGIT_WORDS = {
     "seven": "7",
     "eight": "8",
     "nine": "9",
+    # Roman Urdu digit names (callers and code-switched ASR output). "no"
+    # and "do" are left out: they are also common English words.
+    "sifar": "0",
+    "ek": "1",
+    "teen": "3",
+    "tin": "3",
+    "char": "4",
+    "chaar": "4",
+    "panch": "5",
+    "paanch": "5",
+    "chay": "6",
+    "chhe": "6",
+    "chhay": "6",
+    "che": "6",
+    "saat": "7",
+    "sat": "7",
+    "aath": "8",
+    "ath": "8",
+    "nau": "9",
+    "nao": "9",
 }
 
 

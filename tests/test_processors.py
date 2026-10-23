@@ -22,7 +22,7 @@ from nrsp_agent.conversation.processors import (
     is_echo,
     screen_sentence,
 )
-from nrsp_agent.devtools.loopback import NRSP_PROFILE, TEST_CALL_DATA
+from nrsp_agent.devtools.fixtures import NRSP_PROFILE, TEST_CALL_DATA
 
 FORBIDDEN = ("ہزار", "روپے", "مہلت")
 
@@ -154,7 +154,7 @@ async def test_every_turn_goes_to_the_llm_with_engine_context() -> None:
 
     messages = call.sent_messages()
     assert messages[0]["role"] == "system" and "NRSP" in messages[0]["content"]
-    assert "Allowed actions now" in messages[-1]["content"]
+    assert "you asked:" in messages[-1]["content"]
     assert "haan ji main hi hoon" in messages[-1]["content"]
     assert spoken == [call.engine.render("شکریہ۔ {ask_cnic}")]
 
@@ -162,7 +162,9 @@ async def test_every_turn_goes_to_the_llm_with_engine_context() -> None:
 @pytest.mark.asyncio
 async def test_end_action_speaks_approved_text_and_drops_model_text() -> None:
     call = Call()
-    spoken = await call.turn("آئندہ فون مت کیجیے گا", model_json("opt_out", "کچھ بھی"))
+    confirm = await call.turn("آئندہ فون مت کیجیے گا", model_json("opt_out"))
+    assert confirm[0].endswith("کال نہ کرے؟")
+    spoken = await call.turn("جی بالکل", model_json("affirm", "کچھ بھی"))
 
     assert len(spoken) == 1 and "درخواست نوٹ" in spoken[0]
     assert isinstance(call.out.frames[-1], EndWorkerFrame)
@@ -198,7 +200,7 @@ async def test_history_never_contains_private_call_data() -> None:
     sent = str(call.sent_messages())
     for secret in call.engine.secrets():
         assert secret not in sent
-    assert "[private]" in sent  # the disclosure turn is redacted, not dropped
+    assert "installment_disclosed" in sent  # the model knows it happened
 
 
 @pytest.mark.asyncio
@@ -220,7 +222,7 @@ async def test_llm_timeout_asks_to_repeat_and_late_output_is_ignored() -> None:
 
     assert call.up.of(TTSSpeakFrame)[-1].text.startswith("معذرت")
     before = len(call.out.frames)
-    await stream_llm(call.guard, [model_json("wrong_person")])
+    await stream_llm(call.guard, [model_json("opt_out")])
     assert not any(isinstance(f, LLMTextFrame) for f in call.out.frames[before:])
     assert call.engine.outcome == "in_progress"
 
@@ -229,6 +231,8 @@ async def test_llm_timeout_asks_to_repeat_and_late_output_is_ignored() -> None:
 async def test_closed_call_ignores_further_turns() -> None:
     call = Call()
     await call.turn("نہیں یہ غلط نمبر ہے", model_json("wrong_person"))
+    await call.turn("جی", model_json("affirm"))
+    assert call.engine.outcome == "wrong_person"
     sent_before = len(call.up.of(LLMContextFrame))
 
     await call.turn("ہیلو", None)

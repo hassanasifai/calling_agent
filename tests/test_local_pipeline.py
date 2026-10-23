@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from nrsp_agent.agent import build_engine
-from nrsp_agent.devtools.loopback import NRSP_PROFILE, TEST_CALL_DATA
+from nrsp_agent.devtools.fixtures import NRSP_PROFILE, TEST_CALL_DATA
 from nrsp_agent.voice.local_pipeline import (
     LocalVoicePipelineSettings,
     build_local_voice_agent,
