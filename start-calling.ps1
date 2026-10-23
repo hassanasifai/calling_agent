@@ -131,9 +131,14 @@ function Test-Registered {
 }
 
 Step 'SIP bridge (live calls disabled)'
-if (-not (Test-Path -LiteralPath $Bridge)) {
-    Push-Location (Join-Path $Root 'transport\diago-sidecar')
-    try { go build -o $Bridge . } finally { Pop-Location }
+$BridgeSrc = Join-Path $Root 'transport\diago-sidecar'
+$newest = Get-ChildItem -LiteralPath $BridgeSrc -Filter '*.go' | Sort-Object LastWriteTime | Select-Object -Last 1
+if (-not (Test-Path -LiteralPath $Bridge) -or $newest.LastWriteTime -gt (Get-Item -LiteralPath $Bridge).LastWriteTime) {
+    Push-Location $BridgeSrc
+    try {
+        go build -o $Bridge .
+        if ($LASTEXITCODE -ne 0) { Fail 'go build of the SIP bridge failed' }
+    } finally { Pop-Location }
 }
 Get-Process -Name 'nrsp-diago-bridge' -ErrorAction SilentlyContinue | Stop-Process -Force
 $proc = Start-Bridge ''

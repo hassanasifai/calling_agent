@@ -207,6 +207,32 @@ Windows (once): pull this repo version, `scripts\setup.ps1`, then run
 `NRSP_SIP_BIND_HOST` = laptop LAN IP) and stops; fill them in and run again.
 `.\start-calling.ps1 -CheckOnly` verifies VPN, API and SIP without calling.
 
+## First real Jazz call: FAILED transport_error (2026-10-23)
+- Symptom: DIALING, then FAILED after 10.2 s with `transport_error`, no SIP
+  status, no RINGING/ANSWERED/RTP_READY, no bot audio.
+- Root cause of the *label*: sipgo `WaitAnswer` returns `*ErrDialogResponse`
+  (pointer) but `classifyError` matched only the value type, so every final
+  SIP rejection (403/404/480/486/488/503...) was reported as `transport_error`
+  with no status. Reproduced on loopback: a gateway answering 100 then 480
+  gave exactly `FAILED transport_error` with no sip_status on the old code;
+  fixed code gives `sip_480` + `sip_status=480`
+  (`sip_failure_test.go`, `TestClassifyErrorReportsSIPStatusForBothErrorForms`).
+- 10.2 s with no 180/183 fits a gateway/PBX final rejection after GSM call
+  setup (it is far below Timer B, 32 s, and the 90 s invite timeout); the
+  actual status is UNKNOWN until the next authorized call.
+- Diagnostics added (bridge stderr -> `.tmp\bridge.log.err`, copied into the
+  run folder): `INVITE start` (masked number, PBX, bind, timeout, offered
+  codecs), one `SIP response` line per response (status, reason, Reason/
+  Warning/Server headers incl. Q.850 cause, Via received/rport as seen by the
+  PBX, answered `m=audio`/`c=` SDP lines, auth challenge flag), and
+  `INVITE failed` (elapsed, stage: no_response / auth_challenge / provisional
+  / answered_media_setup / final_response, last status, redacted error).
+  Registration failures now log the redacted error text too. No credentials,
+  digests or full numbers are logged.
+- `start-calling.ps1` now rebuilds the bridge when Go sources are newer than
+  the .exe (it previously reused a stale binary after a pull).
+- Go vet/build (linux + windows/amd64) and `go test ./...` pass.
+
 ## Remaining tasks (priority)
 0. On Windows: run `.\start-calling.ps1 -CheckOnly` (UNVERIFIED: PowerShell
    script, VPN latency, SIP registration), then ONE authorized Jazz call.

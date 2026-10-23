@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -151,7 +152,11 @@ func (b *bridge) registrationLoop(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		slog.Warn("SIP registration stopped; retrying", "error_kind", classifyError(err))
+		errText := ""
+		if err != nil {
+			errText = redact(err.Error(), b.cfg.SIPPassword)
+		}
+		slog.Warn("SIP registration stopped; retrying", "error_kind", classifyError(err), "error", errText)
 		select {
 		case <-ctx.Done():
 			return
@@ -356,11 +361,20 @@ func (s *callSession) run(number string) {
 	inviteCtx, inviteCancel := context.WithTimeout(s.ctx, s.bridge.cfg.InviteTimeout)
 	defer inviteCancel()
 	recipient := sip.Uri{Scheme: "sip", User: number, Host: s.bridge.cfg.PBXHost, Port: s.bridge.cfg.PBXPort}
+	cfg := s.bridge.cfg
+	started := time.Now()
+	var lastStatus atomic.Int64
+	slog.Info("INVITE start", "call_id", s.callID, "to", maskNumber(number),
+		"pbx", net.JoinHostPort(cfg.PBXHost, fmt.Sprint(cfg.PBXPort)), "transport", "udp",
+		"bind", net.JoinHostPort(cfg.SIPBindHost, fmt.Sprint(cfg.SIPBindPort)),
+		"invite_timeout_s", cfg.InviteTimeout.Seconds(), "offer", "PCMA,PCMU,telephone-event")
 	dialog, med, err := s.bridge.diago.Invite(inviteCtx, recipient, diago.InviteOptions{
 		Transport: "udp",
 		Username:  s.bridge.cfg.SIPUser,
 		Password:  s.bridge.cfg.SIPPassword,
 		OnResponse: func(res *sip.Response) error {
+			lastStatus.Store(int64(res.StatusCode))
+			logResponse(s.callID, res, time.Since(started))
 			if res.StatusCode == sip.StatusRinging || res.StatusCode == 183 {
 				s.mu.Lock()
 				first := !s.ringing
@@ -374,11 +388,19 @@ func (s *callSession) run(number string) {
 		},
 	})
 	if err != nil {
+		status := int(lastStatus.Load())
+		slog.Warn("INVITE failed", "call_id", s.callID,
+			"elapsed_ms", time.Since(started).Milliseconds(),
+			"stage", inviteStage(status), "last_sip_status", status,
+			"kind", classifyError(err), "error", redact(err.Error(), cfg.SIPPassword))
 		if s.ctx.Err() != nil {
 			s.finish("HANGUP", s.reasonOr("cancelled"))
 			return
 		}
-		s.finish("FAILED", classifyError(err))
+		if status < 200 {
+			status = 0
+		}
+		s.finishStatus("FAILED", classifyError(err), status)
 		return
 	}
 	s.mu.Lock()
@@ -567,6 +589,10 @@ func (s *callSession) hangupDialog() {
 }
 
 func (s *callSession) finish(event string, reason string) {
+	s.finishStatus(event, reason, 0)
+}
+
+func (s *callSession) finishStatus(event string, reason string, status int) {
 	s.mu.Lock()
 	if s.finished {
 		s.mu.Unlock()
@@ -574,7 +600,7 @@ func (s *callSession) finish(event string, reason string) {
 	}
 	s.finished = true
 	s.mu.Unlock()
-	s.emit(event, reason, 0, "")
+	s.emit(event, reason, status, "")
 	s.cancel()
 }
 
@@ -623,9 +649,79 @@ func classifyError(err error) string {
 	if errors.Is(err, context.Canceled) {
 		return "cancelled"
 	}
+	// sipgo returns *ErrDialogResponse from WaitAnswer but the value type
+	// elsewhere; matching only one hid every SIP rejection as transport_error.
+	var responsePtr *sipgo.ErrDialogResponse
+	if errors.As(err, &responsePtr) && responsePtr != nil && responsePtr.Res != nil {
+		return fmt.Sprintf("sip_%d", responsePtr.Res.StatusCode)
+	}
 	var responseErr sipgo.ErrDialogResponse
-	if errors.As(err, &responseErr) {
+	if errors.As(err, &responseErr) && responseErr.Res != nil {
 		return fmt.Sprintf("sip_%d", responseErr.Res.StatusCode)
 	}
 	return "transport_error"
+}
+
+// inviteStage names how far the INVITE got, from the last response seen.
+func inviteStage(lastStatus int) string {
+	switch {
+	case lastStatus == 0:
+		return "no_response" // nothing came back: routing, firewall or NAT
+	case lastStatus == 401 || lastStatus == 407:
+		return "auth_challenge" // credentials or realm rejected
+	case lastStatus < 200:
+		return "provisional" // trying/ringing, then the transaction failed
+	case lastStatus < 300:
+		return "answered_media_setup" // 200 OK but SDP/codec/ACK failed
+	default:
+		return "final_response"
+	}
+}
+
+// logResponse records one INVITE response without credentials: status, the
+// gateway's Reason/Warning (often a Q.850 cause), how the PBX saw our
+// address (Via received/rport) and the answered audio line of any SDP.
+func logResponse(callID string, res *sip.Response, elapsed time.Duration) {
+	attrs := []any{"call_id", callID, "status", res.StatusCode, "reason", res.Reason,
+		"elapsed_ms", elapsed.Milliseconds()}
+	for _, name := range []string{"Reason", "Warning", "Server", "User-Agent"} {
+		if h := res.GetHeader(name); h != nil {
+			attrs = append(attrs, strings.ToLower(name)+"_hdr", h.Value())
+		}
+	}
+	if via := res.Via(); via != nil && via.Params != nil {
+		if v, ok := via.Params.Get("received"); ok {
+			attrs = append(attrs, "via_received", v)
+		}
+		if v, ok := via.Params.Get("rport"); ok {
+			attrs = append(attrs, "via_rport", v)
+		}
+	}
+	if body := res.Body(); len(body) > 0 {
+		for _, line := range strings.Split(string(body), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "m=audio") || strings.HasPrefix(line, "c=") {
+				attrs = append(attrs, "sdp_"+line[:1], line)
+			}
+		}
+	}
+	if res.StatusCode == 401 || res.StatusCode == 407 {
+		attrs = append(attrs, "auth_challenge", true)
+	}
+	slog.Info("SIP response", attrs...)
+}
+
+// maskNumber keeps only the last four digits of a dialled number in logs.
+func maskNumber(number string) string {
+	if len(number) <= 4 {
+		return number
+	}
+	return strings.Repeat("*", len(number)-4) + number[len(number)-4:]
+}
+
+func redact(text string, secret string) string {
+	if secret == "" {
+		return text
+	}
+	return strings.ReplaceAll(text, secret, "***")
 }
