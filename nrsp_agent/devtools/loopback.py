@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, BinaryIO
 
-from nrsp_agent.conversation.policy import CustomerContext
+from nrsp_agent.agent import build_engine
 from nrsp_agent.session import SessionResult, run_outbound_session
 from nrsp_agent.telephony.diago import DiagoTelephonyPort
 from nrsp_agent.voice.local_pipeline import LocalVoicePipelineSettings, preload_models
@@ -31,13 +31,14 @@ GO_DIR = ROOT / "transport" / "diago-sidecar"
 FIXTURES = ROOT / "tests" / "fixtures" / "caller"
 TEST_NUMBER = "9000"
 
-TEST_CUSTOMER = CustomerContext(
-    customer_name="احمد علی",
-    cnic_last4="4567",
-    installment_amount_pkr=5000,
-    installment_amount_spoken="پانچ ہزار",
-    due_date_spoken="پندرہ نومبر",
-)
+NRSP_PROFILE = ROOT / "config" / "profiles" / "nrsp_verification"
+# Fake test customer; never a real person.
+TEST_CALL_DATA = {
+    "customer_name": "احمد علی",
+    "cnic_last4": "4567",
+    "amount_spoken": "پانچ ہزار",
+    "due_date_spoken": "پندرہ نومبر",
+}
 
 
 @dataclass(frozen=True)
@@ -121,7 +122,7 @@ class RunResult:
                     "result": s.result,
                     "reason": s.reason,
                     "outcome": s.outcome,
-                    "verified": s.verified,
+                    "call_result": s.call_result,
                     "guard_rejections": s.guard_rejections,
                 }
             ),
@@ -325,7 +326,7 @@ async def run_scenario(
                 gateway_id="sim-1",
                 call_id=f"e2e-{scenario.name}-{secrets.token_hex(3)}",
                 voice_settings=settings,
-                customer=TEST_CUSTOMER,
+                engine=build_engine(NRSP_PROFILE, TEST_CALL_DATA),
             ),
             scenario.max_call_s + 30,
         )
@@ -409,7 +410,7 @@ def digest(result: RunResult) -> str:
     if s is not None:
         lines.append(
             f"result={s.result} reason={s.reason} outcome={s.outcome} "
-            f"verified={s.verified} guard_rejections={s.guard_rejections}"
+            f"result={s.call_result} guard_rejections={s.guard_rejections}"
         )
         lines += [
             f"  {t['at_ms']:>7} {t['role']:9} {t['source']:6} {t['text']}"

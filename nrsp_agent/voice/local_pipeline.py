@@ -48,8 +48,7 @@ from pipecat.utils.types import assert_given
 from piper import PiperVoice
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from nrsp_agent.conversation import script
-from nrsp_agent.conversation.policy import ConversationPolicy
+from nrsp_agent.agent.engine import CallEngine
 from nrsp_agent.conversation.processors import (
     ConversationController,
     ConversationRecord,
@@ -70,9 +69,15 @@ class LocalVoicePipelineSettings(BaseModel):
     tts_voice: str = "ur_PK-fasih-medium"
     tts_model_dir: Path = Path("data/models/piper")
     llm_model: str = "qwen3:1.7b"
+    # Any loopback OpenAI-compatible server: Ollama (Windows) or llama.cpp's
+    # llama-server (Ubuntu). Both cache the static system-prompt prefix.
     ollama_base_url: str = "http://127.0.0.1:11434/v1"
     llm_max_tokens: int = Field(default=80, ge=16, le=512)
-    llm_temperature: float = Field(default=0.3, ge=0.0, le=1.5)
+    llm_temperature: float = Field(default=0.2, ge=0.0, le=1.5)
+    # Lexical fallback if the model has not produced a label by then.
+    llm_understanding_timeout_seconds: float = Field(default=8.0, ge=1.0, le=30.0)
+    # Profile action run when the caller stays silent after the task is done.
+    finish_on_silence_action: str = "finish"
     # 0.3 s split Urdu phrases at comma pauses into fragments that Whisper
     # transcribes poorly and that each pay Whisper's fixed ~2 s encoder cost.
     vad_stop_secs: float = Field(default=0.5, ge=0.1, le=1.5)
@@ -210,6 +215,31 @@ def _dump_segment(directory: Path, pcm16: bytes, texts: list[str]) -> None:
     (directory / f"{name}.txt").write_text(" | ".join(texts), encoding="utf-8")
 
 
+class EngineLLMService(OLLamaLLMService):
+    """OpenAI-compatible LLM service whose output is constrained, per turn, to
+    the engine's JSON schema (only the actions allowed at that moment).
+
+    Works with llama.cpp's ``llama-server`` and Ollama, which both implement
+    ``response_format`` JSON schemas with grammar-constrained decoding.
+    """
+
+    def __init__(self, engine: CallEngine, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._engine = engine
+
+    def build_chat_completion_params(self, params_from_context: Any) -> dict:
+        params = super().build_chat_completion_params(params_from_context)
+        params["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "turn",
+                "schema": self._engine.response_schema(),
+                "strict": True,
+            },
+        }
+        return params
+
+
 def preload_models(settings: LocalVoicePipelineSettings) -> None:
     """Load ASR/TTS weights before dialing so answer-to-greeting is fast."""
     shared_whisper_model(
@@ -223,7 +253,7 @@ def preload_models(settings: LocalVoicePipelineSettings) -> None:
 
 @dataclass(frozen=True)
 class LocalVoiceAgent:
-    """A constructed worker plus the policy controller that drives it."""
+    """A constructed worker plus the controller that drives it."""
 
     worker: PipelineWorker
     controller: ConversationController
@@ -231,6 +261,38 @@ class LocalVoiceAgent:
 
     async def queue_initial_greeting(self) -> None:
         await self.controller.greet()
+
+    async def prewarm_llm(self, base_url: str, model: str) -> None:
+        """Fill the LLM server's prefix cache with this call's system prompt
+        while the phone rings, so the first caller turn pays only for its
+        own tokens (measured ~87 prompt tokens/s on 4 CPU threads)."""
+        body = {
+            "model": model,
+            # A user turn too: some chat templates (Qwen3.5) require one.
+            "messages": [
+                self.controller.system_message(),
+                {"role": "user", "content": "."},
+            ],
+            "max_tokens": 1,
+            "cache_prompt": True,
+        }
+        await asyncio.to_thread(_post_json, f"{base_url}/chat/completions", body)
+
+
+def _post_json(url: str, body: dict) -> None:
+    import json
+    import urllib.request
+
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310
+            response.read()
+    except OSError as exc:
+        logger.warning(f"LLM prewarm failed: {exc}")
 
 
 def load_local_voice_settings(path: Path) -> LocalVoicePipelineSettings:
@@ -242,9 +304,12 @@ def load_local_voice_settings(path: Path) -> LocalVoicePipelineSettings:
 def build_local_voice_agent(
     transport: BaseTransport,
     settings: LocalVoicePipelineSettings,
-    policy: ConversationPolicy,
+    engine: CallEngine,
 ) -> LocalVoiceAgent:
-    """Build one fully local Urdu conversation worker for an answered call."""
+    """Build one fully local conversation worker for an answered call.
+
+    Task behaviour comes entirely from ``engine`` (agent profile + call data).
+    """
     record = ConversationRecord()
     stt = SharedWhisperSTTService(
         model_dir=settings.asr_model_dir,
@@ -254,19 +319,27 @@ def build_local_voice_agent(
             model=settings.asr_model,
             language=Language.UR,
             no_speech_prob=0.4,
-            initial_prompt=script.ASR_PROMPT_DOMAIN,
+            initial_prompt=engine.profile.asr_prompts.get("default"),
         ),
     )
-    llm = OLLamaLLMService(
+    llm = EngineLLMService(
+        engine,
         base_url=settings.ollama_base_url,
         settings=OLLamaLLMService.Settings(
             model=settings.llm_model,
-            system_instruction=script.DISCUSS_INSTRUCTION,
+            # The controller sends the full message list per turn, starting
+            # with the engine's system prompt.
             temperature=settings.llm_temperature,
             max_completion_tokens=settings.llm_max_tokens,
-            # Over the OpenAI-compatible API Qwen3 otherwise spends the whole
-            # token budget on hidden reasoning and returns no spoken content.
-            extra={"reasoning_effort": "none"},
+            # Qwen3 otherwise spends the token budget on hidden reasoning:
+            # Ollama reads reasoning_effort, llama.cpp chat_template_kwargs.
+            extra={
+                "reasoning_effort": "none",
+                "extra_body": {
+                    "chat_template_kwargs": {"enable_thinking": False},
+                    "cache_prompt": True,
+                },
+            },
         ),
     )
     tts = PiperTTSService(
@@ -303,7 +376,12 @@ def build_local_voice_agent(
             empty_user_turn=None,
         ),
     )
-    controller = ConversationController(policy, record)
+    controller = ConversationController(
+        engine,
+        record,
+        understanding_timeout_s=settings.llm_understanding_timeout_seconds,
+        finish_on_silence=settings.finish_on_silence_action,
+    )
     user_aggregator = aggregators.user()
 
     @user_aggregator.event_handler("on_user_turn_idle")
@@ -317,7 +395,7 @@ def build_local_voice_agent(
             user_aggregator,
             controller,
             llm,
-            LLMOutputGuard(record),
+            LLMOutputGuard(record, controller),
             tts,
             transport.output(),
             aggregators.assistant(),

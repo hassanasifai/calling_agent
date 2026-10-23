@@ -12,7 +12,7 @@ from loguru import logger
 from pipecat.workers.runner import WorkerRunner
 from pydantic import BaseModel, ConfigDict, Field
 
-from nrsp_agent.conversation.policy import ConversationPolicy, CustomerContext
+from nrsp_agent.agent.engine import CallEngine
 from nrsp_agent.conversation.processors import ConversationRecord
 from nrsp_agent.telephony.contracts import CallEvent, CallEventType, TelephonyPort
 from nrsp_agent.voice.local_pipeline import (
@@ -38,7 +38,8 @@ class SessionResult(BaseModel):
     reason: str | None = None
     sip_status: int | None = None
     outcome: str | None = None
-    verified: bool = False
+    # Profile-defined structured result: flags reached and fields recorded.
+    call_result: dict[str, object] = Field(default_factory=dict)
     transcript: list[dict[str, object]] = Field(default_factory=list)
     events: list[tuple[int, str]] = Field(default_factory=list)
     metrics: list[dict[str, object]] = Field(default_factory=list)
@@ -52,13 +53,12 @@ async def run_outbound_session(
     gateway_id: str,
     call_id: str,
     voice_settings: LocalVoicePipelineSettings,
-    customer: CustomerContext,
+    engine: CallEngine,
 ) -> SessionResult:
     """Run one allowlisted outbound call until SIP or the AI pipeline ends."""
-    policy = ConversationPolicy(customer)
     # Build before dialing: model loading must not delay the greeting.
     agent = build_local_voice_agent(
-        DiagoPipecatTransport(port, call_id), voice_settings, policy
+        DiagoPipecatTransport(port, call_id), voice_settings, engine
     )
     record = agent.record
 
@@ -68,14 +68,17 @@ async def run_outbound_session(
             result=kind,
             reason=reason,
             sip_status=event.sip_status if event else None,
-            outcome=policy.outcome.value,
-            verified=policy.verified,
+            outcome=engine.outcome,
+            call_result=engine.result(),
             transcript=[asdict(turn) for turn in record.turns],
             events=list(record.events),
             metrics=list(record.metrics),
             guard_rejections=len(record.guard_rejections),
         )
 
+    prewarm = asyncio.create_task(
+        agent.prewarm_llm(voice_settings.ollama_base_url, voice_settings.llm_model)
+    )
     await port.start_call(number, gateway_id, call_id)
     events = port.events(call_id)
     media_event = await _wait_for_media(events, record)
@@ -117,7 +120,7 @@ async def run_outbound_session(
             return result(kind, event, event.reason)
 
         await runner_task
-        reason = policy.outcome.value
+        reason = engine.outcome
         record.add_event("local_hangup")
         await _hangup_quietly(port, call_id, reason, drain=True)
         # The bridge reports HANGUP once the drained closing speech has played.
@@ -129,6 +132,8 @@ async def run_outbound_session(
         await runner.cancel(reason="session_cancelled")
         raise
     finally:
+        if not prewarm.done():
+            prewarm.cancel()
         if not terminal_task.done():
             terminal_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

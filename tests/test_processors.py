@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 from pipecat.frames.frames import (
     EndWorkerFrame,
@@ -12,8 +14,7 @@ from pipecat.frames.frames import (
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.frame_processor import FrameDirection
 
-from nrsp_agent.conversation import script
-from nrsp_agent.conversation.policy import ConversationPolicy, Outcome
+from nrsp_agent.agent import build_engine
 from nrsp_agent.conversation.processors import (
     ConversationController,
     ConversationRecord,
@@ -21,7 +22,9 @@ from nrsp_agent.conversation.processors import (
     is_echo,
     screen_sentence,
 )
-from nrsp_agent.devtools.loopback import TEST_CUSTOMER as CUSTOMER
+from nrsp_agent.devtools.loopback import NRSP_PROFILE, TEST_CALL_DATA
+
+FORBIDDEN = ("ہزار", "روپے", "مہلت")
 
 
 @pytest.mark.parametrize(
@@ -37,7 +40,7 @@ from nrsp_agent.devtools.loopback import TEST_CUSTOMER as CUSTOMER
     ],
 )
 def test_guard_rejects_invented_facts_and_wrong_script(sentence: str) -> None:
-    assert screen_sentence(sentence) is None
+    assert screen_sentence(sentence, FORBIDDEN) is None
 
 
 def test_guard_cleans_markup_and_keeps_urdu() -> None:
@@ -85,16 +88,6 @@ async def test_guard_streams_sentences_and_drops_unsafe_ones() -> None:
 
 
 @pytest.mark.asyncio
-async def test_guard_falls_back_when_everything_is_rejected() -> None:
-    guard = LLMOutputGuard(ConversationRecord())
-    out = Capture(guard)
-
-    await stream_llm(guard, ["Okay, I will help you."])
-
-    assert [f.text for f in out.of(LLMTextFrame)] == [script.LLM_FALLBACK]
-
-
-@pytest.mark.asyncio
 async def test_guard_limits_sentence_count() -> None:
     guard = LLMOutputGuard(ConversationRecord(), max_sentences=2)
     out = Capture(guard)
@@ -110,84 +103,156 @@ def user_turn(text: str) -> LLMContextFrame:
     )
 
 
-@pytest.mark.asyncio
-async def test_controller_speaks_scripts_and_never_forwards_unverified_turns() -> None:
-    policy = ConversationPolicy(CUSTOMER)
-    controller = ConversationController(policy, ConversationRecord())
-    out = Capture(controller)
-
-    await controller.process_frame(user_turn("جی ہاں"), FrameDirection.DOWNSTREAM)
-
-    assert out.of(LLMContextFrame) == []
-    assert out.of(TTSSpeakFrame)[0].text.endswith(script.ASK_CNIC_LAST4)
+def model_json(action: str, say: str = "", value: str = "") -> str:
+    return json.dumps(
+        {"action": action, "value": value, "say": say}, ensure_ascii=False
+    )
 
 
-@pytest.mark.asyncio
-async def test_controller_gives_llm_only_the_last_turn() -> None:
-    policy = ConversationPolicy(CUSTOMER)
-    controller = ConversationController(policy, ConversationRecord())
-    out = Capture(controller)
-    for text in ("جی ہاں", "چار پانچ چھ سات"):
-        await controller.process_frame(user_turn(text), FrameDirection.DOWNSTREAM)
+class Call:
+    """Controller + guard wired as in the pipeline, with a scripted model."""
 
-    history = LLMContext(
-        messages=[
-            {"role": "assistant", "content": "آپ کی پانچ ہزار روپے کی قسط"},
-            {"role": "user", "content": "جی میں کوشش کروں گا"},
+    def __init__(self, timeout_s: float = 6.0) -> None:
+        self.engine = build_engine(NRSP_PROFILE, TEST_CALL_DATA)
+        self.record = ConversationRecord()
+        self.controller = ConversationController(
+            self.engine, self.record, understanding_timeout_s=timeout_s
+        )
+        self.guard = LLMOutputGuard(self.record, self.controller)
+        self.up = Capture(self.controller)
+        self.out = Capture(self.guard)
+
+    async def turn(self, caller: str, model_output: str | None) -> list[str]:
+        """Return the texts spoken for this turn (streamed in small chunks)."""
+        before = len(self.out.frames)
+        await self.controller.process_frame(
+            user_turn(caller), FrameDirection.DOWNSTREAM
+        )
+        if model_output is not None:
+            chunks = [model_output[i : i + 5] for i in range(0, len(model_output), 5)]
+            await stream_llm(self.guard, chunks)
+        return [
+            f.text.strip()
+            for f in self.out.frames[before:]
+            if isinstance(f, LLMTextFrame)
         ]
-    )
-    await controller.process_frame(
-        LLMContextFrame(context=history), FrameDirection.DOWNSTREAM
-    )
 
-    sent = out.of(LLMContextFrame)[-1].context.get_messages()
-    assert sent[-1] == {"role": "user", "content": "جی میں کوشش کروں گا"}
-    assert all("ہزار" not in str(m.get("content")) for m in sent)
+    def sent_messages(self) -> list[dict]:
+        return self.up.of(LLMContextFrame)[-1].context.get_messages()
+
+    async def verify(self) -> None:
+        await self.turn("جی", model_json("confirm_identity"))
+        await self.turn("چار پانچ چھ سات", model_json("verify_cnic"))
+        await self.turn("جی درست", model_json("affirm"))
+        assert "verified" in self.engine.flags
 
 
 @pytest.mark.asyncio
-async def test_controller_ends_call_after_closing_speech() -> None:
-    policy = ConversationPolicy(CUSTOMER)
-    record = ConversationRecord()
-    controller = ConversationController(policy, record)
-    out = Capture(controller)
+async def test_every_turn_goes_to_the_llm_with_engine_context() -> None:
+    call = Call()
+    spoken = await call.turn("haan ji main hi hoon", model_json("confirm_identity"))
 
-    await controller.process_frame(
-        user_turn("دوبارہ کال نہ کریں"), FrameDirection.DOWNSTREAM
+    messages = call.sent_messages()
+    assert messages[0]["role"] == "system" and "NRSP" in messages[0]["content"]
+    assert "Allowed actions now" in messages[-1]["content"]
+    assert "haan ji main hi hoon" in messages[-1]["content"]
+    assert spoken == [call.engine.render("شکریہ۔ {ask_cnic}")]
+
+
+@pytest.mark.asyncio
+async def test_end_action_speaks_approved_text_and_drops_model_text() -> None:
+    call = Call()
+    spoken = await call.turn("آئندہ فون مت کیجیے گا", model_json("opt_out", "کچھ بھی"))
+
+    assert len(spoken) == 1 and "درخواست نوٹ" in spoken[0]
+    assert isinstance(call.out.frames[-1], EndWorkerFrame)
+    assert call.engine.outcome == "opted_out"
+    assert "end_call:opted_out" in [e for _, e in call.record.events]
+
+
+@pytest.mark.asyncio
+async def test_model_reply_is_guarded_and_followed_by_pending_question() -> None:
+    call = Call()
+    await call.verify()
+
+    spoken = await call.turn(
+        "قسط کہاں جمع ہو گی؟",
+        model_json(
+            "reply", "ہمارا نمائندہ آپ کو تفصیل بتائے گا۔ ہم آپ کو مہلت دیں گے۔"
+        ),
     )
 
-    kinds = [type(f) for f in out.frames]
-    assert kinds == [TTSSpeakFrame, EndWorkerFrame]
-    assert out.frames[1].reason == Outcome.OPTED_OUT.value
-    assert "end_call:opted_out" in [e for _, e in record.events]
+    assert spoken == [
+        "ہمارا نمائندہ آپ کو تفصیل بتائے گا۔",
+        "کیا آپ مقررہ تاریخ تک ادائیگی کر سکیں گے؟",
+    ]
+    assert call.record.guard_rejections == ["ہم آپ کو مہلت دیں گے۔"]
+
+
+@pytest.mark.asyncio
+async def test_history_never_contains_private_call_data() -> None:
+    call = Call()
+    await call.verify()
+    await call.turn("اچھا", model_json("reply", "جی بہتر۔"))
+
+    sent = str(call.sent_messages())
+    for secret in call.engine.secrets():
+        assert secret not in sent
+    assert "[private]" in sent  # the disclosure turn is redacted, not dropped
+
+
+@pytest.mark.asyncio
+async def test_invalid_output_asks_caller_to_repeat() -> None:
+    call = Call()
+    spoken = await call.turn("ہیلو", "I think the caller wants")
+
+    assert spoken[0].startswith("معذرت، میں آپ کی بات")
+    assert "model_output_invalid" in [e for _, e in call.record.events]
+
+
+@pytest.mark.asyncio
+async def test_llm_timeout_asks_to_repeat_and_late_output_is_ignored() -> None:
+    import asyncio
+
+    call = Call(timeout_s=0.01)
+    await call.turn("جی ہاں", None)
+    await asyncio.sleep(0.05)
+
+    assert call.up.of(TTSSpeakFrame)[-1].text.startswith("معذرت")
+    before = len(call.out.frames)
+    await stream_llm(call.guard, [model_json("wrong_person")])
+    assert not any(isinstance(f, LLMTextFrame) for f in call.out.frames[before:])
+    assert call.engine.outcome == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_closed_call_ignores_further_turns() -> None:
+    call = Call()
+    await call.turn("نہیں یہ غلط نمبر ہے", model_json("wrong_person"))
+    sent_before = len(call.up.of(LLMContextFrame))
+
+    await call.turn("ہیلو", None)
+
+    assert len(call.up.of(LLMContextFrame)) == sent_before
 
 
 @pytest.mark.asyncio
 async def test_controller_greets_once_per_call_record() -> None:
-    record = ConversationRecord()
-    controller = ConversationController(ConversationPolicy(CUSTOMER), record)
-    out = Capture(controller)
+    call = Call()
+    await call.controller.greet()
 
-    await controller.greet()
-
-    assert len(out.of(TTSSpeakFrame)) == 1
-    assert [t.source for t in record.turns] == ["script"]
+    assert len(call.up.of(TTSSpeakFrame)) == 1
+    assert [t.source for t in call.record.turns] == ["script"]
 
 
 @pytest.mark.asyncio
-async def test_controller_scopes_digit_asr_prompt_to_verification() -> None:
+async def test_asr_prompt_follows_profile_actions() -> None:
     from pipecat.frames.frames import STTUpdateSettingsFrame
 
-    controller = ConversationController(
-        ConversationPolicy(CUSTOMER), ConversationRecord()
-    )
-    out = Capture(controller)
+    call = Call()
+    await call.verify()
 
-    await controller.process_frame(user_turn("جی ہاں"), FrameDirection.DOWNSTREAM)
-    await controller.process_frame(
-        user_turn("چار پانچ چھ سات"), FrameDirection.DOWNSTREAM
-    )
-
-    prompts = [f.delta.initial_prompt for f in out.of(STTUpdateSettingsFrame)]
-    assert prompts == [script.ASR_PROMPT_DIGITS, script.ASR_PROMPT_DOMAIN]
-    assert CUSTOMER.cnic_last4 not in script.ASR_PROMPT_DIGITS
+    prompts = [f.delta.initial_prompt for f in call.up.of(STTUpdateSettingsFrame)]
+    profile = call.engine.profile
+    assert prompts == [profile.asr_prompts["digits"], profile.asr_prompts["default"]]
+    assert TEST_CALL_DATA["cnic_last4"] not in profile.asr_prompts["digits"]

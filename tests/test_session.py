@@ -6,8 +6,9 @@ from collections.abc import AsyncIterator
 import pytest
 
 import nrsp_agent.session as session_module
+from nrsp_agent.agent import build_engine
 from nrsp_agent.conversation.processors import ConversationRecord
-from nrsp_agent.devtools.loopback import TEST_CUSTOMER
+from nrsp_agent.devtools.loopback import NRSP_PROFILE, TEST_CALL_DATA
 from nrsp_agent.session import SessionResultType, run_outbound_session
 from nrsp_agent.telephony.contracts import (
     AudioFrame,
@@ -84,6 +85,9 @@ class FakeAgent:
         self.greetings += 1
         self.greeted.set()
 
+    async def prewarm_llm(self, base_url: str, model: str) -> None:
+        self.prewarmed = (base_url, model)
+
 
 class FakeRunner:
     """Fires on_pipeline_started twice to prove the greeting is idempotent."""
@@ -135,7 +139,7 @@ async def run(port: ScriptedPort, call_id: str = "call-1"):
             gateway_id="sim-1",
             call_id=call_id,
             voice_settings=LocalVoicePipelineSettings(),
-            customer=TEST_CUSTOMER,
+            engine=build_engine(NRSP_PROFILE, TEST_CALL_DATA),
         ),
         5,
     )

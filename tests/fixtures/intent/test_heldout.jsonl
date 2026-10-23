@@ -1,0 +1,39 @@
+{"stage": "identity", "text": "جی بالکل، فرمائیے", "action": "confirm_identity"}
+{"stage": "identity", "text": "ji main hi hoon, boliye", "action": "confirm_identity"}
+{"stage": "identity", "text": "this is him, go ahead", "action": "confirm_identity"}
+{"stage": "identity", "text": "نہیں جی، یہ نمبر تو میرا ہے، میں احمد نہیں ہوں", "action": "wrong_person"}
+{"stage": "identity", "text": "wo ghar par nahi hain", "action": "wrong_person"}
+{"stage": "identity", "text": "آپ کس ادارے سے بول رہے ہیں؟", "action": "reply"}
+{"stage": "identity", "text": "pehle batayen aap kaun?", "action": "reply"}
+{"stage": "identity", "text": "ابھی میں میٹنگ میں ہوں، شام کو فون کریں", "action": "callback"}
+{"stage": "identity", "text": "اس نمبر پر دوبارہ فون نہ کرنا", "action": "opt_out"}
+{"stage": "identity", "text": "ہیلو ہیلو؟ کچھ سنائی نہیں دے رہا", "action": "reply"}
+{"stage": "verify", "text": "دو چھ صفر نو", "digits": "2609", "action": "verify_cnic"}
+{"stage": "verify", "text": "jee, ek ek do teen", "digits": "1123", "action": "verify_cnic"}
+{"stage": "verify", "text": "seven zero four four", "digits": "7044", "action": "verify_cnic"}
+{"stage": "verify", "text": "آخری چار؟ ایک منٹ، تین سات آٹھ ایک", "digits": "3781", "action": "verify_cnic"}
+{"stage": "verify", "text": "یہ معلومات میں نہیں دے سکتا", "action": "reply"}
+{"stage": "verify", "text": "مجھے کارڈ دیکھنا پڑے گا، ابھی پاس نہیں ہے", "action": "reply"}
+{"stage": "verify", "text": "مجھے کسی انسان سے بات کرائیں", "action": "human_handoff"}
+{"stage": "discuss", "text": "جی، تنخواہ آتے ہی جمع کرا دوں گا", "action": "record_promise"}
+{"stage": "discuss", "text": "fikar na karein, time pe ho jayegi", "action": "record_promise"}
+{"stage": "discuss", "text": "I will pay by Friday", "action": "record_promise"}
+{"stage": "discuss", "text": "بیماری کی وجہ سے کام نہیں کر پا رہا، قسط دینا مشکل ہو رہا ہے", "action": "record_difficulty"}
+{"stage": "discuss", "text": "abhi paise nahi hain mere paas", "action": "record_difficulty"}
+{"stage": "discuss", "text": "کیا آپ تاریخ آگے کر سکتے ہیں؟", "action": "record_difficulty"}
+{"stage": "discuss", "text": "میری کتنی رقم واجب الادا ہے؟", "action": "tell_installment"}
+{"stage": "discuss", "text": "amount kitni hai?", "action": "tell_installment"}
+{"stage": "discuss", "text": "due date kya hai", "action": "tell_installment"}
+{"stage": "discuss", "text": "کس دن تک پیسے جمع کروانے ہیں؟", "action": "tell_installment"}
+{"stage": "discuss", "text": "قسط آن لائن جمع ہو سکتی ہے؟", "action": "reply"}
+{"stage": "discuss", "text": "میرا اگلا قرض کب منظور ہو گا؟", "action": "reply"}
+{"stage": "discuss", "text": "مجھے اپنی کال لسٹ سے ہٹا دیں", "action": "opt_out"}
+{"stage": "discuss", "text": "don't call this number again", "action": "opt_out"}
+{"stage": "discuss", "text": "کسی سپروائزر سے بات کروائیں", "action": "human_handoff"}
+{"stage": "discuss", "text": "I want to speak to your manager", "action": "human_handoff"}
+{"stage": "discuss", "text": "نہیں، اور کوئی سوال نہیں", "action": "finish"}
+{"stage": "discuss", "text": "bas itna hi, shukriya", "action": "finish"}
+{"stage": "discuss", "text": "اچھا جی، اللہ نگہبان", "action": "finish"}
+{"stage": "discuss", "text": "ok bye", "action": "finish"}
+{"stage": "discuss", "text": "یہ کال ریکارڈ ہو رہی ہے؟", "action": "reply"}
+{"stage": "discuss", "text": "کل بات کر لیں؟ ابھی کھیت میں ہوں", "action": "callback"}

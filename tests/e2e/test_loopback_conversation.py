@@ -55,7 +55,8 @@ def assert_clean_media(result: RunResult) -> None:
 def test_happy_path(results: dict[str, RunResult]) -> None:
     r = results["happy_path"]
     assert_clean_media(r)
-    assert r.session.outcome == "completed" and r.session.verified
+    assert r.session.outcome == "completed"
+    assert "verified" in r.session.call_result["flags"]
     sources = [t["source"] for t in r.session.transcript if t["role"] == "assistant"]
     assert "llm" in sources
     assert r.peer["hangup_by"] == "bridge"
@@ -83,7 +84,8 @@ def test_exits_never_disclose(
 ) -> None:
     r = results[scenario]
     assert_clean_media(r)
-    assert r.session.outcome == outcome and not r.session.verified
+    assert r.session.outcome == outcome
+    assert "verified" not in r.session.call_result["flags"]
     assert not any(secret in spoken(r) for secret in SECRETS)
     assert r.peer["hangup_by"] == "bridge"
 

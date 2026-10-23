@@ -1,0 +1,54 @@
+# A second, unrelated task proving the engine is generic: confirm or
+# reschedule a clinic appointment. No engine code knows about it.
+name = "clinic_appointment_confirmation"
+persona = "You are the friendly automated assistant of City Clinic."
+objective = "Confirm that {patient_name} will attend the appointment, or note a preferred new time."
+rules = ["Never give medical advice."]
+public_fields = ["patient_name", "doctor"]
+completion = ["attendance_known"]
+knowledge_files = ["faq.md"]
+reply_allow_digits = true
+greeting = "السلام علیکم، سٹی کلینک سے بات ہو رہی ہے۔"
+greeting_ask = "کیا آپ {patient_name} ہیں؟"
+silence_prompt = "ہیلو؟"
+no_response = "ہم بعد میں رابطہ کریں گے۔ خدا حافظ۔"
+repeat_request = "معاف کیجیے، دوبارہ بتائیں؟"
+unclear_close = "رابطے میں مسئلہ ہے، خدا حافظ۔"
+
+[texts]
+slot = "{doctor} کے ساتھ آپ کی ملاقات {appointment_time} پر ہے۔"
+
+[[actions]]
+name = "identity_ok"
+kind = "say"
+when = "the caller is {patient_name}"
+blocked_by = ["identity_ok"]
+sets = ["identity_ok"]
+say = "{slot}"
+ask = "کیا آپ آ سکیں گے؟"
+
+[[actions]]
+name = "will_attend"
+kind = "say"
+when = "the caller will attend"
+requires = ["identity_ok"]
+sets = ["attendance_known"]
+say = "بہت شکریہ، ہم آپ کا انتظار کریں گے۔"
+ask = "کچھ اور؟"
+
+[[actions]]
+name = "reschedule"
+kind = "record"
+when = "the caller cannot attend (value: their preferred new time)"
+requires = ["identity_ok"]
+field = "preferred_time"
+sets = ["attendance_known"]
+ask = "کچھ اور؟"
+
+[[actions]]
+name = "done"
+kind = "end"
+when = "the caller has nothing else"
+outcome = "completed"
+outcome_if_incomplete = "incomplete"
+say = "خدا حافظ۔"

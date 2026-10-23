@@ -5,9 +5,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from nrsp_agent.conversation import script
-from nrsp_agent.conversation.policy import ConversationPolicy
-from nrsp_agent.devtools.loopback import TEST_CUSTOMER
+from nrsp_agent.agent import build_engine
+from nrsp_agent.devtools.loopback import NRSP_PROFILE, TEST_CALL_DATA
 from nrsp_agent.voice.local_pipeline import (
     LocalVoicePipelineSettings,
     build_local_voice_agent,
@@ -30,7 +29,6 @@ def test_local_pipeline_defaults_are_urdu_and_offline() -> None:
     assert settings.asr_model_dir == Path("data/models/faster-whisper")
     # Slow ASR must never push a transcript into the following turn.
     assert settings.user_turn_stop_timeout_seconds >= 15
-    assert "OTP" in script.DISCUSS_INSTRUCTION
 
 
 def test_ollama_endpoint_rejects_remote_service() -> None:
@@ -60,12 +58,12 @@ def test_real_pipeline_builds_with_shared_models() -> None:
     first = build_local_voice_agent(
         DiagoPipecatTransport(Port(), "call-1"),  # type: ignore[arg-type]
         settings,
-        ConversationPolicy(TEST_CUSTOMER),
+        build_engine(NRSP_PROFILE, TEST_CALL_DATA),
     )
     second = build_local_voice_agent(
         DiagoPipecatTransport(Port(), "call-2"),  # type: ignore[arg-type]
         settings,
-        ConversationPolicy(TEST_CUSTOMER),
+        build_engine(NRSP_PROFILE, TEST_CALL_DATA),
     )
 
     def whisper(processor):

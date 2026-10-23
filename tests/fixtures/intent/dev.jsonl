@@ -1,0 +1,40 @@
+{"stage": "identity", "text": "جی فرمائیں، میں ہی ہوں", "action": "confirm_identity"}
+{"stage": "identity", "text": "haan ji, Ahmed bol raha hun", "action": "confirm_identity"}
+{"stage": "identity", "text": "yes speaking", "action": "confirm_identity"}
+{"stage": "identity", "text": "جی، وہ میرے والد ہیں، میں ان کا بیٹا بول رہا ہوں", "action": "wrong_person"}
+{"stage": "identity", "text": "یہاں کوئی احمد نہیں رہتا", "action": "wrong_person"}
+{"stage": "identity", "text": "آپ کو کس سے بات کرنی ہے؟ آپ ہیں کون؟", "action": "reply"}
+{"stage": "identity", "text": "kaun sahib baat kar rahe hain?", "action": "reply"}
+{"stage": "identity", "text": "ابھی میں گاڑی چلا رہا ہوں، بعد میں بات کریں", "action": "callback"}
+{"stage": "identity", "text": "hello? awaz nahi aa rahi", "action": "reply"}
+{"stage": "verify", "text": "ٹھہریں دیکھ کے بتاتا ہوں، چار تین دو ایک", "digits": "4321", "action": "verify_cnic"}
+{"stage": "verify", "text": "nine eight seven six", "digits": "9876", "action": "verify_cnic"}
+{"stage": "verify", "text": "پانچ پانچ صفر دو", "digits": "5502", "action": "verify_cnic"}
+{"stage": "verify", "text": "aath saat chay paanch", "digits": "8765", "action": "verify_cnic"}
+{"stage": "verify", "text": "میں اپنا شناختی کارڈ نمبر فون پر نہیں بتاؤں گا", "action": "reply"}
+{"stage": "verify", "text": "یاد نہیں ہے مجھے", "action": "reply"}
+{"stage": "verify", "text": "یہ کیوں چاہیے آپ کو؟", "action": "reply"}
+{"stage": "discuss", "text": "جی ان شاء اللہ وقت پر جمع کروا دوں گا", "action": "record_promise"}
+{"stage": "discuss", "text": "ہاں ہاں ہو جائے گی ادائیگی، فکر نہ کریں", "action": "record_promise"}
+{"stage": "discuss", "text": "bhai is mahine haath tang hai", "action": "record_difficulty"}
+{"stage": "discuss", "text": "فصل خراب ہو گئی ہے، ابھی پیسوں کا بندوبست نہیں", "action": "record_difficulty"}
+{"stage": "discuss", "text": "کتنی قسط بنتی ہے میری؟", "action": "tell_installment"}
+{"stage": "discuss", "text": "how much do I owe?", "action": "tell_installment"}
+{"stage": "discuss", "text": "قسط جمع کرانے کی آخری تاریخ کون سی ہے؟", "action": "tell_installment"}
+{"stage": "discuss", "text": "kab tak jama karwani hai", "action": "tell_installment"}
+{"stage": "discuss", "text": "میں ادائیگی کہاں کر سکتا ہوں؟", "action": "reply"}
+{"stage": "discuss", "text": "کیا میں ایزی پیسہ سے قسط دے سکتا ہوں؟", "action": "reply"}
+{"stage": "discuss", "text": "آپ لوگ بار بار فون کیوں کرتے ہیں؟ آئندہ فون مت کیجیے گا", "action": "opt_out"}
+{"stage": "discuss", "text": "stop calling me please", "action": "opt_out"}
+{"stage": "discuss", "text": "میرا نمبر ڈیلیٹ کر دیں", "action": "opt_out"}
+{"stage": "discuss", "text": "مجھے آپ کے کسی افسر سے بات کرنی ہے", "action": "human_handoff"}
+{"stage": "discuss", "text": "can I talk to a real person", "action": "human_handoff"}
+{"stage": "discuss", "text": "برانچ منیجر سے رابطہ کروا دیں", "action": "human_handoff"}
+{"stage": "discuss", "text": "نہیں بس، شکریہ", "action": "finish"}
+{"stage": "discuss", "text": "اور کچھ نہیں جی", "action": "finish"}
+{"stage": "discuss", "text": "ٹھیک ہے پھر، خدا حافظ", "action": "finish"}
+{"stage": "discuss", "text": "chalo theek hai, bye", "action": "finish"}
+{"stage": "discuss", "text": "آپ انسان ہیں یا مشین؟", "action": "reply"}
+{"stage": "discuss", "text": "میرا قرض کب ختم ہو گا؟", "action": "reply"}
+{"stage": "discuss", "text": "کیا جرمانہ لگے گا اگر دیر ہو گئی؟", "action": "reply"}
+{"stage": "discuss", "text": "بعد میں بات کرتے ہیں، ابھی مصروف ہوں", "action": "callback"}

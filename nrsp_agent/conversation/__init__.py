@@ -1,1 +1,1 @@
-"""Deterministic NRSP call policy and its Pipecat integration."""
+"""Pipecat integration of the generic call engine."""
