@@ -254,3 +254,17 @@ def test_missing_public_field_is_rejected() -> None:
 )
 def test_spoken_number_parser(text: str, digits: str) -> None:
     assert extract_digits(text) == digits
+
+
+def test_keypad_entry_verifies_exactly_without_readback() -> None:
+    engine = nrsp()
+    assert engine.on_keypad("4567") is None  # nothing to verify yet
+    engine.on_model("confirm_identity", "", "جی")
+    assert engine.keypad_length() == 4
+
+    wrong = engine.on_keypad("1234")
+    assert "مطابقت" in wrong.speak and "verified" not in engine.flags
+    ok = engine.on_keypad("4567")
+    assert "verified" in engine.flags
+    assert TEST_CALL_DATA["amount_spoken"] in ok.speak
+    assert engine.keypad_length() is None

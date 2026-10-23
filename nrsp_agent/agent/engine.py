@@ -47,6 +47,13 @@ class _Formatter(dict):
         raise KeyError(f"approved text references unknown field {{{key}}}")
 
 
+class _Placeholder(dict):
+    """Renders ``{field}`` as ``[field]`` so the prompt is call-independent."""
+
+    def __missing__(self, key: str) -> str:
+        return f"[{key}]"
+
+
 @dataclass
 class CallEngine:
     profile: AgentProfile
@@ -160,8 +167,14 @@ class CallEngine:
         )
 
     def system_prompt(self) -> str:
-        """Static for the whole call, so the server's prefix cache covers it."""
+        """Identical for every call of a profile except the final call-details
+        lines, so the server's prefix cache is reused across calls (measured:
+        a cold ~1,240-token prefix costs ~35 s on 4-5 CPU threads)."""
         p = self.profile
+
+        def static(template: str) -> str:
+            return template.format_map(_Placeholder()).strip()
+
         facts = "\n".join(f"- {k}: {self.call_data[k]}" for k in p.public_fields)
         rules = "\n".join(f"- {r}" for r in p.rules)
         if not p.reply_allow_digits:
@@ -170,7 +183,7 @@ class CallEngine:
                 " fact is needed choose the action that provides it."
             )
         actions = "\n".join(
-            f"- {a.name}: {self.render(a.when)}"
+            f"- {a.name}: {static(a.when)}"
             + (
                 ' [system speaks approved text; say ""]'
                 if a.kind != ActionKind.RECORD
@@ -180,16 +193,17 @@ class CallEngine:
             for a in p.actions
         )
         builtins = (
-            f"- {AFFIRM}: the caller confirms the digits you read back\n"
-            f"- {REJECT}: the caller says the digits you read back are wrong\n"
+            f"- {AFFIRM}: the caller says yes to your confirmation question"
+            " (digits you read back, or confirming their request)\n"
+            f"- {REJECT}: the caller says no to your confirmation question\n"
             if AFFIRM in self.action_names()
             else ""
         )
         examples = "\n".join(
-            (f"({self.render(e.context)}) " if e.context else "")
-            + f"Caller: {self.render(e.caller)} => "
+            (f"({static(e.context)}) " if e.context else "")
+            + f"Caller: {static(e.caller)} => "
             + json.dumps(
-                {"action": e.action, "value": e.value, "say": self.render(e.say)},
+                {"action": e.action, "value": e.value, "say": static(e.say)},
                 ensure_ascii=False,
             )
             for e in p.examples
@@ -197,8 +211,8 @@ class CallEngine:
         if examples:
             examples = f"\n\nExamples:\n{examples}"
         return (
-            f"{p.persona}\n\nTask: {self.render(p.objective)}\n\n"
-            f"Known call details:\n{facts}\n\nRules:\n{rules}\n\n"
+            f"{static(p.persona)}\n\nTask: {static(p.objective)}\n\n"
+            f"Rules:\n{rules}\n\n"
             "Callers may speak Urdu, Roman Urdu, English or a mix; their words come"
             " from speech recognition and may be misspelled, so infer the meaning."
             "\n\nFor each caller turn choose exactly one action:\n"
@@ -210,6 +224,7 @@ class CallEngine:
             " at most two short sentences, without asking the next question"
             " (the system asks it)."
             f"{examples}"
+            f"\n\nThis call's details (the [names] above refer to these):\n{facts}"
         )
 
     def turn_message(self, caller_text: str, redact) -> str:
@@ -264,6 +279,34 @@ class CallEngine:
             self.fields[chosen.field] = (value or caller_text).strip()[:200]
             return self._model_reply(chosen.ask, chosen.asr_prompt)
         return self._approved(chosen.say, chosen.ask, chosen.asr_prompt)
+
+    def on_keypad(self, digits: str) -> Decision | None:
+        """Keypad (DTMF) entry for the verification that is currently open.
+
+        Keypad digits are exact, so they are compared without read-back.
+        Returns ``None`` when no verification is waiting for digits.
+        """
+        if self.closed:
+            return None
+        action = next(
+            (a for a in self._available() if a.kind == ActionKind.VERIFY), None
+        )
+        if action is None:
+            return None
+        self._silences = self._failed = 0
+        self._candidate = None
+        if not self._verify_question:
+            self._verify_question = self.pending_ask
+        if len(digits) != action.digits:
+            return self._approved(action.say_unclear, self._verify_ask(action))
+        return self._check(action, digits)
+
+    def keypad_length(self) -> int | None:
+        """Digits expected now from the keypad, if a verification is open."""
+        for a in self._available():
+            if a.kind == ActionKind.VERIFY:
+                return a.digits
+        return None
 
     def on_failure(self) -> Decision | None:
         """The model gave no usable answer (timeout, invalid output, ASR loop)."""

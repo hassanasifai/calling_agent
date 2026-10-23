@@ -31,6 +31,7 @@ type scriptFile struct {
 	Utterances    []struct {
 		Name    string `json:"name"`
 		WAV     string `json:"wav"`
+		Digits  string `json:"digits"`
 		Mode    string `json:"mode"`
 		DelayMS int    `json:"delay_ms"`
 	} `json:"utterances"`
@@ -121,16 +122,19 @@ func loadScript(path string) (testpeer.Script, error) {
 	}
 	base := filepath.Dir(path)
 	for _, u := range file.Utterances {
-		wavPath := u.WAV
-		if !filepath.IsAbs(wavPath) {
-			wavPath = filepath.Join(base, wavPath)
-		}
-		pcm, err := readWAV8k(wavPath)
-		if err != nil {
-			return testpeer.Script{}, fmt.Errorf("%s: %w", u.Name, err)
+		var pcm []byte
+		if u.WAV != "" {
+			wavPath := u.WAV
+			if !filepath.IsAbs(wavPath) {
+				wavPath = filepath.Join(base, wavPath)
+			}
+			var err error
+			if pcm, err = readWAV8k(wavPath); err != nil {
+				return testpeer.Script{}, fmt.Errorf("%s: %w", u.Name, err)
+			}
 		}
 		script.Utterances = append(script.Utterances, testpeer.Utterance{
-			Name: u.Name, PCM: pcm, Mode: u.Mode, DelayMS: u.DelayMS,
+			Name: u.Name, PCM: pcm, Digits: u.Digits, Mode: u.Mode, DelayMS: u.DelayMS,
 		})
 	}
 	return script, nil

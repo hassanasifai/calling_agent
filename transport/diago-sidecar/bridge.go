@@ -390,7 +390,7 @@ func (s *callSession) run(number string) {
 	defer med.Close()
 	s.emit("ANSWERED", "", sip.StatusOK, "")
 
-	pcmReader, pcmWriter, codec, err := setupPCM(med)
+	pcmReader, pcmWriter, codec, err := setupPCM(med, s.emitDTMF)
 	if err != nil {
 		s.emit("RTP_LOST", "media_setup_failed", 0, "")
 		s.hangupDialog()
@@ -452,9 +452,18 @@ func (s *callSession) watchRTP(timeout time.Duration, result chan<- error) {
 	}
 }
 
-func setupPCM(med *diago.DialogMedia) (io.Reader, io.Writer, media.Codec, error) {
+// setupPCM returns decoded PCM I/O for the call. Keypad presses arriving as
+// RFC 2833 telephone-events (offered in our SDP) are passed to onDTMF.
+func setupPCM(med *diago.DialogMedia, onDTMF func(rune)) (io.Reader, io.Writer, media.Codec, error) {
 	readerProps := diago.MediaProps{}
-	encodedReader, err := med.AudioReader(diago.WithAudioReaderMediaProps(&readerProps))
+	dtmf := &diago.DTMFReader{}
+	dtmf.OnDTMF(func(key rune) error {
+		onDTMF(key)
+		return nil
+	})
+	encodedReader, err := med.AudioReader(
+		diago.WithAudioReaderMediaProps(&readerProps), diago.WithAudioReaderDTMF(dtmf),
+	)
 	if err != nil {
 		return nil, nil, media.Codec{}, err
 	}
@@ -587,6 +596,16 @@ func (s *callSession) emit(event string, reason string, status int, codec string
 		Reason:      reason,
 		SIPStatus:   status,
 		Codec:       codec,
+	})
+}
+
+func (s *callSession) emitDTMF(key rune) {
+	_ = s.owner.send(callEvent{
+		Type:        "event",
+		CallID:      s.callID,
+		Event:       "DTMF",
+		MonotonicMS: s.bridge.monotonicMS(),
+		Digit:       string(key),
 	})
 }
 

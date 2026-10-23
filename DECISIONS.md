@@ -55,7 +55,7 @@ concurrent-call benchmarks run on the target Windows Server.
 
 ## ADR-004: Deterministic call policy; the LLM only acknowledges
 
-Status: accepted, 2026-10-23.
+Status: superseded by ADR-007/008 (2026-10-23); kept for its evidence.
 
 Identity confirmation, CNIC-suffix verification, disclosure of amount and due
 date, opt-out, wrong person, human handoff, payment difficulty, silence and
@@ -115,3 +115,58 @@ Status: accepted, 2026-10-23.
 - The bridge opts out of Windows power throttling and runs at above-normal
   priority; it fails a call after `NRSP_RTP_TIMEOUT_SECONDS` without inbound
   RTP, and reads each decoded RTP packet regardless of the remote ptime.
+
+## ADR-007: Generic profile-driven engine; NRSP is a profile
+
+Status: accepted, 2026-10-23. Supersedes the NRSP-specific policy of ADR-004.
+
+Task behaviour (persona, objective, rules, knowledge, actions, approved texts,
+result fields, ASR prompts, voice) lives in `config/profiles/<name>/`. The
+engine (`nrsp_agent/agent/`) knows four action kinds — say, record, verify,
+end — plus flags that gate availability, confirmations and safety actions. A
+second unrelated profile runs on the same code in tests. No exact-phrase
+matching decides intent; the LLM chooses an action, code validates it.
+
+## ADR-008: One streamed, schema-constrained LLM call per turn
+
+Status: accepted, 2026-10-23.
+
+The model returns `{"action", "value", "say"}` under a JSON schema built per
+turn from the actions allowed now (llama.cpp and Ollama both enforce it by
+grammar). Approved-text actions must have an empty `say`, so generation stops
+early; the action is applied as soon as its name is complete. Evidence:
+per-turn schema + few-shot raised Gemma-4-E2B dev accuracy 65 % → 75 %
+(held-out 82 %) and removed invalid outputs. Private call data never reaches
+the model; history stores the model's own output. Measured: the ~1,240-token
+system prompt costs ~35 s cold on 4–5 CPU threads, so it is identical across
+calls (per-call details last), the full call history is kept (a sliding window
+caused 300–430-token re-processing, +7–11 s), and warm-ups send the exact
+request shape (`chat_template_kwargs` changes the rendered prompt).
+
+## ADR-009: Model selection (CPU, measured)
+
+Status: accepted for Ubuntu dev, 2026-10-23; re-measure on target hardware.
+
+- ASR: whisper-small-urdu (Apache-2.0) as CTranslate2 int8, beam 5: best
+  ASR→LLM understanding (58/68 vs 50 base-urdu, 46 Canopy-M); FLEURS WER 28 %
+  vs 44 % for multilingual small. Canopy-M is 20× faster but loses 12 points.
+- LLM: Gemma-4-E2B-it QAT Q4_0 (Apache-2.0): held-out 82 %, stays within
+  rules. Qwen3.5-2B ties on actions but promised "more time" and claimed to be
+  human; Qwen3-1.7B fell to 64 % on held-out phrasings.
+- TTS: Piper `ur_PK-aegis_female-medium` (MIT): G.711 intelligibility CER 3.8 %
+  vs 8.7 % for fasih at equal cost. Kani-TTS-Urdu and Orpheus-Urdu are not
+  real-time on this CPU.
+- Runtime: official llama.cpp CPU build (runtime AVX-512 kernels), 4.3× faster
+  generation than a generic OpenBLAS build.
+
+## ADR-010: Verification inputs and confirmations
+
+Status: accepted, 2026-10-23.
+
+Spoken digits are parsed by code (Urdu, English, Roman Urdu number words) and
+read back for yes/no confirmation; the LLM never reconstructs numbers. DTMF
+(RFC 2833) keypad entry is offered and compared exactly. Irreversible endings
+(opt-out, handoff, wrong person) are confirmed first because the model was
+measured choosing them for "who is calling?" and "I can't hear you"; during a
+confirmation only yes/no, a new verification attempt and safety exits are
+allowed.

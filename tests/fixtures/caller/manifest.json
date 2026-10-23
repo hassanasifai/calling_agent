@@ -54,5 +54,13 @@
   "payment_difficulty": {
     "text": "ابھی میرے پاس پیسے نہیں ہیں۔",
     "seconds": 2.13
+  },
+  "yes_correct": {
+    "text": "جی ہاں، یہ درست ہیں۔",
+    "seconds": 1.84
+  },
+  "yes": {
+    "text": "جی ہاں۔",
+    "seconds": 1.21
   }
 }

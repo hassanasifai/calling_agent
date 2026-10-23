@@ -1,0 +1,15 @@
+# Ubuntu dev VM (CPU only, shared with Financial AI): local llama.cpp server
+# started by scripts/run_llm_server.sh on a private loopback port.
+[voice]
+# whisper-small-urdu (khawajaaliarshad, Apache-2.0) as CTranslate2 int8:
+# scripts/convert_asr_model.sh. Best measured ASR->LLM understanding (85%).
+asr_model = "data/models/ct2/whisper-small-urdu"
+asr_device = "cpu"
+asr_compute_type = "int8"
+asr_cpu_threads = 6
+tts_voice = "ur_PK-aegis_female-medium"
+tts_model_dir = "data/models/piper"
+llm_model = "gemma-4-E2B"
+ollama_base_url = "http://127.0.0.1:18431/v1"
+idle_timeout_seconds = 120.0
+llm_understanding_timeout_seconds = 12.0

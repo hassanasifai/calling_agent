@@ -1,78 +1,69 @@
 # Implementation status
 
-Updated: 2026-10-23
+Updated: 2026-10-23 (Ubuntu AIUAT dev VM, CPU only, shared with Financial AI)
 
-## Milestone: offline end-to-end Urdu conversation — PASS (synthetic caller)
+## Milestone: generic profile-driven calling engine — offline SIP/RTP validated
 
-A complete Urdu AI conversation runs through the real components: Go/Diago
-bridge ⇄ real SIP (digest REGISTER + 407 INVITE) and G.711 PCMA RTP ⇄ a
-loopback test PBX/callee (`transport/diago-sidecar/testpeer`) that plays
-telephone-band Urdu caller speech and audits every RTP packet ⇄ Python
-`DiagoTelephonyPort` ⇄ Pipecat 1.13 (Silero VAD, Faster-Whisper small,
-Qwen3 1.7B via Ollama, Piper ur_PK-fasih) ⇄ deterministic NRSP call policy.
+The engine is task-agnostic: a call is driven by an **agent profile**
+(`config/profiles/<name>/profile.toml` + knowledge files). NRSP installment
+reminder with identity verification is the first profile; an unrelated clinic
+profile runs on the same code in tests.
 
-Run: `python -m nrsp_agent.devtools.loopback all` (see README).
+Stack: Go/Diago bridge ⇄ SIP/RTP (G.711) ⇄ Pipecat 1.13 (Silero VAD,
+whisper-small-urdu via faster-whisper, Gemma-4-E2B via llama.cpp/Ollama
+OpenAI API, Piper `ur_PK-aegis_female-medium`) ⇄ generic `CallEngine`.
 
-Measured on the demo laptop (i7-13620H, 7.7 GB, CPU only), after freeing RAM,
-PCMA, 8 scenarios:
+### Offline SIP/RTP loopback (real bridge, test PBX/callee, real models)
+`python -m nrsp_agent.devtools.loopback all --profile config/ubuntu-dev.toml`
+(needs `scripts/run_llm_server.sh`). Final run, 9 scenarios:
 
-| Scenario | Outcome | Notes |
-|---|---|---|
-| happy_path | completed, verified | greeting → identity → CNIC suffix → notice → LLM reply → goodbye → drained BYE |
-| barge_in | completed | caller interrupts greeting; bot audio stopped 700 ms after caller onset |
-| opt_out / wrong_person | opted_out / wrong_person | no amount/date disclosed |
-| silence | no_response | two prompts, then close |
-| remote_hangup_mid_turn | remote_hangup | BYE during ASR; clean teardown |
-| rtp_loss | rtp_timeout | bridge emits RTP_LOST, sends BYE |
-| handoff | **missed** (fails safe) | Whisper heard "نمائندے" as "نمائن دیس"; re-asked, then closed |
+| Scenario | Result |
+|---|---|
+| happy_path | completed, verified (spoken digits + read-back), promise recorded |
+| barge_in | completed; bot audio stopped 600 ms after caller onset |
+| wrong_person / handoff | correct outcome after the profile's confirmation question |
+| silence / remote_hangup_mid_turn / rtp_loss | correct teardown |
+| keypad_verification | DTMF path verified in earlier run; final run: caller's garbled "جی ہاں" read as wrong person (understanding miss) |
+| opt_out | passed in 2 of 3 runs; final run: caller's short "جی ہاں" never produced a turn (see open issues) |
 
-Latency (happy path; peer-measured, caller speech end → bot speech start):
-2.4–3.3 s on scripted turns, 6.9 s on the LLM turn. Answer → first bot audio
-220–400 ms. Per-service: Whisper small 1.8–2.8 s per turn (dominant; fixed
-~2 s encoder cost), Qwen3 first token 1.25 s / full reply 4.4 s, Piper first
-audio 0.04–0.15 s. RTP: 0 sequence/timestamp errors, 1 SSRC, jitter ≤0.5 ms,
-clock drift ≤0.6 ms per call; 0 dropped caller frames.
+Media: 0 sequence gaps, 1 SSRC, jitter ≤ 1.6 ms, drift ≤ 41 ms in every call;
+RTP timestamp skips (8–73 per call) coincide with host load (max inter-arrival
+79 ms) — the bridge's designed tick-skip, not drift.
 
-Verification: Go `go test ./...` (loopback two-way PCM per codec; full bridge
-over a digest-auth PBX: events, RTP integrity and drift, one call per SIM,
-clear_audio barge-in, drained hangup, RTP-loss watchdog). Python: 84 unit
-tests (policy, guard, controller, transport pacing/clear, session ordering
-and teardown, adapter), ruff + black clean. Opt-in E2E:
-`NRSP_E2E=1 pytest tests/e2e`.
+Latency (peer-measured, 18 caller turns): **end of caller speech → first bot
+audio P50 8.1 s, P95 11.7 s** on this contended CPU. Answer → greeting 0.9 s.
+Per stage: ASR 2.65 s P50, LLM first token 2.3 s P50 (+~0.8 s to the action),
+TTS first audio 0.54 s P50, VAD end-of-speech 0.5 s. **The <2 s target is not
+met on CPU**; ASR + LLM are ~85 % of the path and both run ~10× faster on a GPU
+(endpoints are configurable, no code change).
 
-## Defects found and fixed this milestone
+### Verification
+Python: 78 passed, 9 skipped (opt-in E2E + Windows-only); ruff/black clean.
+Go: `go test ./...` passes (bridge + media integration, DTMF reader wiring).
+Benchmarks and evaluation sets: see PROGRESS.md.
 
-- Qwen3 over Ollama `/v1` spent the whole budget on hidden reasoning and
-  returned no content → `reasoning_effort: none` (first token 0.13 s warm).
-- Pipecat output was unpaced; Piper (~18× real time) overflowed the bridge
-  queue and truncated replies → paced output, 80 ms lead.
-- No far-end clear on barge-in → `clear_audio` command.
-- RTP sent only while speaking, timestamps drifted; missed ticks drifted
-  permanently (4.9 s/218 s under paging) → continuous clock with re-align.
-- No inbound-RTP watchdog; fixed 20 ms read assumed remote ptime.
-- Audio could be sent before `RTP_READY`; models loaded after answer; greeting
-  LLM-generated; deprecated turn filter; Whisper ignored the project model
-  cache; full audio queue tore down the shared bridge connection.
-- Slow ASR attached transcripts to the next turn (5 s turn-stop default).
-- Whisper prompt words hallucinated into intents (goodbye, handoff) and
-  ended calls; repetition loops took ~40 s per segment → see ADR-005.
-- Silent TTS contexts could mark TTS unusable and end the call.
+## Changes this milestone
+- Generic engine, NRSP moved to a profile; LLM-first understanding with
+  per-turn JSON-schema-constrained actions; code-validated consequential steps.
+- Model selection by measurement: whisper-small-urdu (ASR), Gemma-4-E2B (LLM),
+  Piper aegis_female (TTS). See PROGRESS.md for every rejected candidate.
+- Verification: code-parsed spoken digits with read-back; DTMF keypad entry.
+- Confirmation before irreversible endings (opt-out, handoff, wrong person).
+- Prefix-cache-friendly prompts (cross-call static system prompt, full in-call
+  history, warm-ups with identical request shape); stale-answer protection.
+- VAD tuned for short Urdu answers (confidence 0.5, start 0.1 s).
 
-## Not verified / open gates
-
-- **No real call yet.** miniSIPServer/ZTE/Jazz with this build is untested;
-  `docs/jazz-test-runbook.md` is prepared. Requires explicit authorization of
-  one exact test number.
-- **ASR accuracy is the main risk.** Fixtures are synthetic Piper speech;
-  Whisper-small over G.711 garbles many words (intents still matched 7/8
-  scenarios). Needs a real recorded Urdu telephone evaluation set; compare
-  small vs. large-v3-turbo on the Windows Server (turbo took 6.6–7 s/segment
-  on the laptop CPU).
-- LLM quality with qwen3:1.7b is acceptable only because the policy and guard
-  constrain it; qwen3:8b (server profile) is unbenchmarked.
-- Demo laptop needs ~3.5 GB free RAM; with browsers/WSL open it paged and the
-  LLM first token reached 33 s. CPU throttling observed (perf 49–127%).
-- Barge-in during the closing line, digits in non-verification turns while
-  the digit ASR prompt is active, and µ-law (PCMU) end-to-end are untested.
-- Durable queue, call records storage, multi-SIM scheduling, Windows service,
-  concurrency benchmarks: not started.
+## Not verified / open issues
+- **No real call.** miniSIPServer/ZTE/Jazz untested with this build; whether the
+  ZTE gateway forwards RFC 2833 DTMF is unknown.
+- **Accuracy on real Pakistani callers is unmeasured**: no recorded telephone
+  speech; FLEURS is read speech; domain and loopback callers are synthetic.
+- Spoken CNIC digits are unreliable on CPU ASR (≤25 % per attempt on non-bot
+  voices); keypad entry is the recommended path.
+- Intermittent: a short caller answer right after a bot question sometimes
+  produces no VAD event live (same audio replayed offline is detected). Impact:
+  one silence re-prompt. Next step: per-frame VAD logging on the live path.
+- LLM understanding errors on garbled ASR (e.g. "کی ہند میں احمد علی…").
+- Windows: Ollama tag for Gemma-4-E2B and Windows latency not yet measured.
+- Naturalness of the aegis voice needs human listening
+  (`data/eval/tts_samples/`).

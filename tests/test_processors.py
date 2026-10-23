@@ -260,3 +260,43 @@ async def test_asr_prompt_follows_profile_actions() -> None:
     profile = call.engine.profile
     assert prompts == [profile.asr_prompts["digits"], profile.asr_prompts["default"]]
     assert TEST_CALL_DATA["cnic_last4"] not in profile.asr_prompts["digits"]
+
+
+@pytest.mark.asyncio
+async def test_keypad_digits_are_buffered_and_never_logged() -> None:
+    call = Call()
+    await call.turn("جی", model_json("confirm_identity"))
+    for key in "45":
+        await call.controller.on_keypad(key)
+    assert "verified" not in call.engine.flags
+    for key in "67":
+        await call.controller.on_keypad(key)
+
+    assert "verified" in call.engine.flags
+    spoken = call.up.of(TTSSpeakFrame)[-1].text
+    assert TEST_CALL_DATA["amount_spoken"] in spoken
+    logged = str(call.record.events) + str(call.record.turns[:-1])
+    assert "4567" not in logged and "keypad_entry" in logged
+
+
+@pytest.mark.asyncio
+async def test_answer_to_a_superseded_request_is_never_applied() -> None:
+    from pipecat.frames.frames import InterruptionFrame
+
+    call = Call(timeout_s=0.01)
+    await call.controller.process_frame(user_turn("جی ہاں"), FrameDirection.DOWNSTREAM)
+    down = FrameDirection.DOWNSTREAM
+    await call.guard.process_frame(LLMFullResponseStartFrame(), down)  # request 1
+    import asyncio
+
+    await asyncio.sleep(0.05)  # turn 1 times out; caller speaks again
+    await call.controller.process_frame(
+        user_turn("میں فون پر نمبر نہیں بتاتا"), FrameDirection.DOWNSTREAM
+    )
+    assert any(isinstance(f, InterruptionFrame) for f in call.up.frames)
+    # Request 1's late answer arrives while request 2 is open.
+    await call.guard.process_frame(LLMTextFrame(text=model_json("wrong_person")), down)
+    await call.guard.process_frame(LLMFullResponseEndFrame(), down)
+
+    assert call.engine.pending_ask.startswith("کیا میری بات")  # nothing applied
+    assert "stale_model_output_dropped" in [e for _, e in call.record.events]

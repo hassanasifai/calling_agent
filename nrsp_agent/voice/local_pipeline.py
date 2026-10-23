@@ -66,6 +66,8 @@ class LocalVoicePipelineSettings(BaseModel):
     asr_device: str = "cpu"
     asr_compute_type: str = "int8"
     asr_model_dir: Path = Path("data/models/faster-whisper")
+    # CTranslate2 threads for ASR (the LLM is idle while ASR runs).
+    asr_cpu_threads: int = Field(default=4, ge=1, le=64)
     tts_voice: str = "ur_PK-fasih-medium"
     tts_model_dir: Path = Path("data/models/piper")
     llm_model: str = "qwen3:1.7b"
@@ -81,6 +83,11 @@ class LocalVoicePipelineSettings(BaseModel):
     # 0.3 s split Urdu phrases at comma pauses into fragments that Whisper
     # transcribes poorly and that each pay Whisper's fixed ~2 s encoder cost.
     vad_stop_secs: float = Field(default=0.5, ge=0.1, le=1.5)
+    # Short answers ("جی ہاں", ~0.9 s) never reached SPEAKING at Pipecat's
+    # 0.7 / 0.2 s defaults over G.711; 0.5 / 0.1 s detected 16/16 caller
+    # fixtures with 0/8 false triggers on the noise clips.
+    vad_confidence: float = Field(default=0.5, ge=0.2, le=0.95)
+    vad_start_secs: float = Field(default=0.1, ge=0.05, le=0.5)
     user_speech_timeout_seconds: float = Field(default=0.6, ge=0.2, le=3.0)
     # Fallback that closes a turn when no transcript arrives. It must exceed
     # worst-case ASR latency, or a late transcript is attributed to the next
@@ -101,14 +108,14 @@ class LocalVoicePipelineSettings(BaseModel):
 # Model weights are loaded once per process and shared by every call's
 # pipeline; CTranslate2 and ONNX Runtime sessions are safe for concurrent use.
 _model_lock = threading.Lock()
-_whisper_models: dict[tuple[str, str, str, str], WhisperModel] = {}
+_whisper_models: dict[tuple[str, str, str, str, int], WhisperModel] = {}
 _piper_voices: dict[tuple[str, bool], PiperVoice] = {}
 
 
 def shared_whisper_model(
-    model: str, device: str, compute_type: str, download_root: Path
+    model: str, device: str, compute_type: str, download_root: Path, threads: int = 4
 ) -> WhisperModel:
-    key = (model, device, compute_type, str(download_root))
+    key = (model, device, compute_type, str(download_root), threads)
     with _model_lock:
         if key not in _whisper_models:
             _whisper_models[key] = WhisperModel(
@@ -116,6 +123,7 @@ def shared_whisper_model(
                 device=device,
                 compute_type=compute_type,
                 download_root=str(download_root),
+                cpu_threads=threads,
             )
         return _whisper_models[key]
 
@@ -135,6 +143,15 @@ class _CachedPiperVoice:
 piper_tts.PiperVoice = _CachedPiperVoice  # type: ignore[misc,assignment]
 
 
+# Provider-specific request fields shared by every LLM request, including
+# cache warm-ups: they change how the chat template renders the prompt, so a
+# warm-up without them does not match (measured: 24.6 s cold first turn).
+LLM_EXTRA_BODY = {
+    "chat_template_kwargs": {"enable_thinking": False},
+    "cache_prompt": True,
+}
+
+
 # One caller turn on the phone; Urdu runs ~2-3 tokens per word in Whisper.
 WHISPER_MAX_TOKENS_PER_TURN = 96
 
@@ -142,13 +159,18 @@ WHISPER_MAX_TOKENS_PER_TURN = 96
 class SharedWhisperSTTService(WhisperSTTService):
     """Whisper STT that reuses a process-wide model from the project cache."""
 
-    def __init__(self, *, model_dir: Path, **kwargs: object) -> None:
+    def __init__(self, *, model_dir: Path, threads: int = 4, **kwargs: object) -> None:
         self._model_dir = model_dir
+        self._threads = threads
         super().__init__(**kwargs)
 
     def _load(self) -> None:
         self._model = shared_whisper_model(
-            str(self._settings.model), self._device, self._compute_type, self._model_dir
+            str(self._settings.model),
+            self._device,
+            self._compute_type,
+            self._model_dir,
+            self._threads,
         )
         unsupported = self._unsupported_language()
         if unsupported:
@@ -247,6 +269,7 @@ def preload_models(settings: LocalVoicePipelineSettings) -> None:
         settings.asr_device,
         settings.asr_compute_type,
         settings.asr_model_dir,
+        settings.asr_cpu_threads,
     )
     _CachedPiperVoice.load(settings.tts_model_dir / f"{settings.tts_voice}.onnx")
 
@@ -262,6 +285,9 @@ class LocalVoiceAgent:
     async def queue_initial_greeting(self) -> None:
         await self.controller.greet()
 
+    async def on_keypad(self, key: str) -> None:
+        await self.controller.on_keypad(key)
+
     async def prewarm_llm(self, base_url: str, model: str) -> None:
         """Fill the LLM server's prefix cache with this call's system prompt
         while the phone rings, so the first caller turn pays only for its
@@ -274,7 +300,8 @@ class LocalVoiceAgent:
                 {"role": "user", "content": "."},
             ],
             "max_tokens": 1,
-            "cache_prompt": True,
+            "reasoning_effort": "none",
+            **LLM_EXTRA_BODY,
         }
         await asyncio.to_thread(_post_json, f"{base_url}/chat/completions", body)
 
@@ -313,6 +340,7 @@ def build_local_voice_agent(
     record = ConversationRecord()
     stt = SharedWhisperSTTService(
         model_dir=settings.asr_model_dir,
+        threads=settings.asr_cpu_threads,
         device=settings.asr_device,
         compute_type=settings.asr_compute_type,
         settings=WhisperSTTService.Settings(
@@ -335,10 +363,7 @@ def build_local_voice_agent(
             # Ollama reads reasoning_effort, llama.cpp chat_template_kwargs.
             extra={
                 "reasoning_effort": "none",
-                "extra_body": {
-                    "chat_template_kwargs": {"enable_thinking": False},
-                    "cache_prompt": True,
-                },
+                "extra_body": LLM_EXTRA_BODY,
             },
         ),
     )
@@ -349,7 +374,7 @@ def build_local_voice_agent(
         # unusable, which ends the call under ProcessorUnusablePolicy.END.
         stop_frame_timeout_s=8.0,
         settings=PiperTTSService.Settings(
-            voice=settings.tts_voice,
+            voice=engine.profile.tts_voice or settings.tts_voice,
             language=Language.UR,
         ),
     )
@@ -360,7 +385,11 @@ def build_local_voice_agent(
         user_params=LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(
                 sample_rate=16_000,
-                params=VADParams(stop_secs=settings.vad_stop_secs),
+                params=VADParams(
+                    confidence=settings.vad_confidence,
+                    start_secs=settings.vad_start_secs,
+                    stop_secs=settings.vad_stop_secs,
+                ),
             ),
             user_turn_strategies=UserTurnStrategies(
                 start=[VADUserTurnStartStrategy()],

@@ -45,6 +45,7 @@ class _Event(BaseModel):
     reason: str | None = None
     sip_status: int | None = None
     codec: str | None = None
+    digit: str | None = None
 
 
 class _Audio(BaseModel):

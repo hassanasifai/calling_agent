@@ -88,6 +88,9 @@ class FakeAgent:
     async def prewarm_llm(self, base_url: str, model: str) -> None:
         self.prewarmed = (base_url, model)
 
+    async def on_keypad(self, key: str) -> None:
+        self.keys = getattr(self, "keys", "") + key
+
 
 class FakeRunner:
     """Fires on_pipeline_started twice to prove the greeting is idempotent."""
@@ -234,3 +237,29 @@ async def test_local_hangup_racing_remote_bye_is_not_an_error(
         SessionResultType.PIPELINE_FINISHED,
         SessionResultType.REMOTE_HANGUP,
     }
+
+
+async def test_dtmf_events_reach_the_agent_and_are_not_logged(
+    agent: FakeAgent,
+) -> None:
+    port = ScriptedPort()
+    for kind in (
+        CallEventType.DIALING,
+        CallEventType.ANSWERED,
+        CallEventType.RTP_READY,
+    ):
+        await port.queue.put(event("call-1", kind))
+
+    async def keypad_then_bye() -> None:
+        await agent.greeted.wait()
+        for key in "4567":
+            await port.queue.put(event("call-1", CallEventType.DTMF, digit=key))
+        await port.queue.put(
+            event("call-1", CallEventType.HANGUP, reason="remote_hangup")
+        )
+
+    asyncio.create_task(keypad_then_bye())
+    result = await run(port)
+
+    assert agent.keys == "4567"
+    assert all("4567" not in name and name != "dtmf" for _, name in result.events)

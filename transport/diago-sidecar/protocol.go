@@ -45,6 +45,8 @@ type callEvent struct {
 	Reason      string `json:"reason,omitempty"`
 	SIPStatus   int    `json:"sip_status,omitempty"`
 	Codec       string `json:"codec,omitempty"`
+	// Digit is one RFC 2833 keypad key ("0"-"9", "*", "#") for DTMF events.
+	Digit string `json:"digit,omitempty"`
 }
 
 type audioMessage struct {

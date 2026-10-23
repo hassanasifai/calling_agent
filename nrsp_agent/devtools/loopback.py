@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
@@ -25,7 +26,11 @@ from nrsp_agent.agent import build_engine
 from nrsp_agent.devtools.fixtures import NRSP_PROFILE, TEST_CALL_DATA
 from nrsp_agent.session import SessionResult, run_outbound_session
 from nrsp_agent.telephony.diago import DiagoTelephonyPort
-from nrsp_agent.voice.local_pipeline import LocalVoicePipelineSettings, preload_models
+from nrsp_agent.voice.local_pipeline import (
+    LLM_EXTRA_BODY,
+    LocalVoicePipelineSettings,
+    preload_models,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 GO_DIR = ROOT / "transport" / "diago-sidecar"
@@ -53,6 +58,11 @@ def _u(name: str, mode: str = "after_bot", delay_ms: int = 0) -> dict[str, Any]:
     }
 
 
+def _keys(name: str, digits: str) -> dict[str, Any]:
+    """Keypad entry sent as RFC 2833 telephone-events after the bot speaks."""
+    return {"name": name, "digits": digits, "mode": "after_bot", "delay_ms": 0}
+
+
 SCENARIOS: dict[str, Scenario] = {
     s.name: s
     for s in (
@@ -61,6 +71,16 @@ SCENARIOS: dict[str, Scenario] = {
             [
                 _u("confirm_identity"),
                 _u("cnic_last4"),
+                _u("yes_correct"),
+                _u("pay_on_time"),
+                _u("goodbye"),
+            ],
+        ),
+        Scenario(
+            "keypad_verification",
+            [
+                _u("confirm_identity"),
+                _keys("cnic_keypad", TEST_CALL_DATA["cnic_last4"]),
                 _u("pay_on_time"),
                 _u("goodbye"),
             ],
@@ -70,12 +90,14 @@ SCENARIOS: dict[str, Scenario] = {
             [
                 _u("barge_in_identity", "barge_in", 1800),
                 _u("cnic_last4"),
+                _u("yes_correct"),
                 _u("goodbye"),
             ],
         ),
-        Scenario("opt_out", [_u("opt_out")]),
-        Scenario("wrong_person", [_u("wrong_person")]),
-        Scenario("handoff", [_u("handoff")]),
+        # Irreversible endings are confirmed by the profile before the call ends.
+        Scenario("opt_out", [_u("opt_out"), _u("yes")]),
+        Scenario("wrong_person", [_u("wrong_person"), _u("yes")]),
+        Scenario("handoff", [_u("handoff"), _u("yes")]),
         Scenario("silence", []),
         Scenario(
             "remote_hangup_mid_turn",
@@ -137,9 +159,10 @@ def build_go_binaries() -> tuple[Path, Path]:
     bin_dir = GO_DIR / "bin"
     bridge = bin_dir / "nrsp-diago-bridge.exe"
     peer = bin_dir / "sip-test-peer.exe"
+    go = shutil.which("go") or str(ROOT / ".cache" / "go-dist" / "go" / "bin" / "go")
     for target, package in ((bridge, "."), (peer, "./cmd/sip-test-peer")):
         subprocess.run(
-            ["go", "build", "-o", str(target), package], cwd=GO_DIR, check=True
+            [go, "build", "-o", str(target), package], cwd=GO_DIR, check=True
         )
     return bridge, peer
 
@@ -149,9 +172,20 @@ def warm_ollama(settings: LocalVoicePipelineSettings) -> float:
     body = json.dumps(
         {
             "model": settings.llm_model,
-            "messages": [{"role": "user", "content": "سلام"}],
+            # The profile's system prompt is shared by every call, so warming
+            # it once fills the server's prefix cache for all calls.
+            "messages": [
+                {
+                    "role": "system",
+                    "content": build_engine(
+                        NRSP_PROFILE, TEST_CALL_DATA
+                    ).system_prompt(),
+                },
+                {"role": "user", "content": "."},
+            ],
             "max_tokens": 1,
             "reasoning_effort": "none",
+            **LLM_EXTRA_BODY,
         }
     ).encode()
     request = urllib.request.Request(

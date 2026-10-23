@@ -88,6 +88,9 @@ class AgentProfile(BaseModel):
 
     name: str
     language: str = "ur"
+    # Piper voice for this persona (gendered wording must match); empty
+    # means the deployment's default voice.
+    tts_voice: str = ""
     persona: str
     objective: str
     rules: tuple[str, ...] = ()

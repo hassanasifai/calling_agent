@@ -25,7 +25,8 @@ SECRETS = ("پانچ ہزار", "پندرہ نومبر")
 
 @pytest.fixture(scope="module")
 def results(tmp_path_factory: pytest.TempPathFactory) -> dict[str, RunResult]:
-    settings = load_local_voice_settings(ROOT / "config" / "demo.toml")
+    config = os.environ.get("NRSP_VOICE_CONFIG", str(ROOT / "config" / "demo.toml"))
+    settings = load_local_voice_settings(Path(config))
     out = Path(tmp_path_factory.mktemp("e2e"))
     runs = asyncio.run(run_scenarios(list(SCENARIOS), out, settings))
     return {r.scenario: r for r in runs}
@@ -63,6 +64,14 @@ def test_happy_path(results: dict[str, RunResult]) -> None:
     assert all(u["reply_latency_ms"] is not None for u in r.peer["utterances"] or [])
 
 
+def test_keypad_verification_over_rtp(results: dict[str, RunResult]) -> None:
+    r = results["keypad_verification"]
+    assert_clean_media(r)
+    assert r.session.outcome == "completed"
+    assert "verified" in r.session.call_result["flags"]
+    assert "keypad_entry" in [name for _, name in r.session.events]
+
+
 def test_barge_in_stops_bot_quickly(results: dict[str, RunResult]) -> None:
     r = results["barge_in"]
     assert_clean_media(r)
@@ -76,6 +85,7 @@ def test_barge_in_stops_bot_quickly(results: dict[str, RunResult]) -> None:
     [
         ("opt_out", "opted_out"),
         ("wrong_person", "wrong_person"),
+        ("handoff", "handoff_requested"),
         ("silence", "no_response"),
     ],
 )

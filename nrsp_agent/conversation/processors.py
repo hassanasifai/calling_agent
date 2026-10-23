@@ -132,6 +132,10 @@ class ConversationController(FrameProcessor):
         self._turn_text = ""
         self._turn_open = False
         self._watchdog: asyncio.Task | None = None
+        self._keys = ""
+        # One LLM request in flight at a time; responses carry its id.
+        self.request_id = 0
+        self._awaiting_response = False
 
     def system_message(self) -> dict:
         return {"role": "system", "content": self.engine.system_prompt()}
@@ -140,6 +144,26 @@ class ConversationController(FrameProcessor):
         decision = self.engine.greeting()
         self.assistant_said(decision.speak, "script", "greeting")
         await self.push_frame(TTSSpeakFrame(decision.speak))
+
+    async def on_keypad(self, key: str) -> None:
+        """One DTMF key. Digits are buffered while a verification is open and
+        checked when complete (or on '#'); key values are never logged."""
+        expected = self.engine.keypad_length()
+        if expected is None:
+            self._keys = ""
+            return
+        if key == "*":
+            self._keys = ""
+            return
+        if key != "#":
+            self._keys += key
+        if key == "#" or len(self._keys) >= expected:
+            digits, self._keys = self._keys, ""
+            self._record.add_event("keypad_entry")
+            # The keypad answer supersedes any spoken turn in flight.
+            self._turn_open = False
+            self._cancel_watchdog()
+            await self._apply(self.engine.on_keypad(digits))
 
     async def handle_silence(self) -> None:
         self._record.add_event("user_silence_timeout")
@@ -170,14 +194,30 @@ class ConversationController(FrameProcessor):
         # model generated) so the next request shares the server's cached
         # prefix and only the new turn's tokens are processed.
         self._history.append(turn)
+        if self._awaiting_response:
+            # A slow answer to an earlier turn is still streaming: cancel it so
+            # it can never be applied to this turn.
+            self._record.add_event("llm_request_superseded")
+            await self.push_frame(InterruptionFrame())
         self._turn_text, self._turn_open = text, True
+        self.request_id += 1
+        self._awaiting_response = True
         self._cancel_watchdog()
         self._watchdog = asyncio.create_task(self._fallback_after_timeout())
         await self.push_frame(LLMContextFrame(context=LLMContext(messages=messages)))
 
-    async def resolve(self, action: str | None, value: str) -> Decision | None:
-        """Called by the guard with the model's action (``None`` if unusable)."""
-        if not self._turn_open:
+    def response_done(self) -> None:
+        self._awaiting_response = False
+
+    async def resolve(
+        self, action: str | None, value: str, request_id: int
+    ) -> Decision | None:
+        """Called by the guard with the model's action (``None`` if unusable).
+
+        Answers to an earlier request, or arriving after the turn timed out,
+        are ignored."""
+        if not self._turn_open or request_id != self.request_id:
+            self._record.add_event("stale_model_output_dropped")
             return None
         self._turn_open = False
         self._cancel_watchdog()
@@ -332,6 +372,8 @@ class LLMOutputGuard(FrameProcessor):
         self._reset()
 
     def _reset(self) -> None:
+        self._active = False
+        self._request = 0
         self._raw = ""
         self._say_from: int | None = None
         self._say_done = False
@@ -347,16 +389,23 @@ class LLMOutputGuard(FrameProcessor):
         await super().process_frame(frame, direction)
         if isinstance(frame, LLMFullResponseStartFrame):
             self._reset()
+            self._active = True
+            if self._controller is not None:
+                self._request = self._controller.request_id
             await self.push_frame(frame, direction)
         elif isinstance(frame, LLMTextFrame):
             await self._on_text(frame.text)
         elif isinstance(frame, LLMFullResponseEndFrame):
-            await self._finish()
+            if self._active or self._controller is None:
+                await self._finish()
+            self._active = False
+            if self._controller is not None:
+                self._controller.response_done()
             await self.push_frame(frame, direction)
             if self._decision is not None and self._decision.end_call:
                 await self.push_frame(EndWorkerFrame(reason="end_call"))
         elif isinstance(frame, InterruptionFrame):
-            self._pending = ""
+            self._reset()
             await self.push_frame(frame, direction)
         else:
             await self.push_frame(frame, direction)
@@ -405,7 +454,7 @@ class LLMOutputGuard(FrameProcessor):
         self._resolved = True
         self._action = action or "invalid"
         assert self._controller is not None
-        self._decision = await self._controller.resolve(action, value)
+        self._decision = await self._controller.resolve(action, value, self._request)
         if self._decision is not None and self._decision.speak:
             await self._say(self._decision.speak)
 

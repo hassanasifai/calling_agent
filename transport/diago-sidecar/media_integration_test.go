@@ -57,7 +57,7 @@ func testDiagoLoopbackTwoWayPCM(t *testing.T, codec media.Codec) {
 			return
 		}
 		defer med.Close()
-		reader, writer, _, err := setupPCM(med)
+		reader, writer, _, err := setupPCM(med, func(rune) {})
 		if err != nil {
 			serverErr <- fmt.Errorf("setup server PCM: %w", err)
 			return
@@ -103,7 +103,7 @@ func testDiagoLoopbackTwoWayPCM(t *testing.T, codec media.Codec) {
 	}
 	defer dialog.Close()
 	defer med.Close()
-	reader, writer, negotiated, err := setupPCM(med)
+	reader, writer, negotiated, err := setupPCM(med, func(rune) {})
 	if err != nil {
 		t.Fatalf("setup client PCM: %v", err)
 	}

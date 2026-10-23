@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import asdict
 from enum import StrEnum
 
@@ -103,7 +103,9 @@ async def run_outbound_session(
             await agent.queue_initial_greeting()
 
     runner_task = asyncio.create_task(runner.run())
-    terminal_task = asyncio.create_task(_wait_for_terminal(events, record))
+    terminal_task = asyncio.create_task(
+        _wait_for_terminal(events, record, agent.on_keypad)
+    )
     try:
         done, _ = await asyncio.wait(
             {runner_task, terminal_task}, return_when=asyncio.FIRST_COMPLETED
@@ -161,9 +163,15 @@ async def _wait_for_media(
 
 
 async def _wait_for_terminal(
-    events: AsyncIterator[CallEvent], record: ConversationRecord
+    events: AsyncIterator[CallEvent],
+    record: ConversationRecord,
+    on_keypad: Callable[[str], Awaitable[None]],
 ) -> CallEvent:
     async for event in events:
+        if event.event == CallEventType.DTMF:
+            if event.digit:
+                await on_keypad(event.digit)
+            continue
         record.add_event(event.event.value.lower())
         if event.event in _TERMINAL:
             return event

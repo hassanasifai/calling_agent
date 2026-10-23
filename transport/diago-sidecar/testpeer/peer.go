@@ -50,8 +50,10 @@ const (
 )
 
 type Utterance struct {
-	Name    string `json:"name"`
-	PCM     []byte `json:"-"`
+	Name string `json:"name"`
+	PCM  []byte `json:"-"`
+	// Digits, when set, are sent as RFC 2833 keypad events instead of PCM.
+	Digits  string `json:"digits"`
 	Mode    string `json:"mode"`
 	DelayMS int    `json:"delay_ms"`
 }
@@ -294,7 +296,9 @@ func (p *Peer) runCall(dialog *diago.DialogServerSession) Report {
 		report.Result = "ringing_failed"
 		return report
 	}
-	med, err := dialog.Answer(diago.AnswerOptions{Codecs: []media.Codec{p.cfg.Codec}})
+	med, err := dialog.Answer(diago.AnswerOptions{
+		Codecs: []media.Codec{p.cfg.Codec, media.CodecTelephoneEvent8000},
+	})
 	if err != nil {
 		report.Result = "answer_failed"
 		return report
@@ -319,7 +323,10 @@ func (p *Peer) runCall(dialog *diago.DialogServerSession) Report {
 		return report
 	}
 	writerProps := diago.MediaProps{}
-	encodedWriter, err := med.AudioWriter(diago.WithAudioWriterMediaProps(&writerProps))
+	dtmf := &diago.DTMFWriter{}
+	encodedWriter, err := med.AudioWriter(
+		diago.WithAudioWriterMediaProps(&writerProps), diago.WithAudioWriterDTMF(dtmf),
+	)
 	if err != nil {
 		report.Result = "media_failed"
 		return report
@@ -333,7 +340,7 @@ func (p *Peer) runCall(dialog *diago.DialogServerSession) Report {
 	go p.readLoop(decoder, state)
 	ctx, cancel := context.WithTimeout(dialog.Context(), p.cfg.Script.MaxCallTimeout)
 	defer cancel()
-	result, sent, logs := p.writeLoop(ctx, encoder, state)
+	result, sent, logs := p.writeLoop(ctx, encoder, dtmf, state)
 
 	hangupBy := "bridge"
 	if dialog.Context().Err() == nil {
@@ -400,7 +407,7 @@ func (s *callState) botIdle(silenceMS int) bool {
 	return s.botSpokeSince && !s.botSpeaking && s.nowMS()-s.lastBotSpeechMS >= int64(silenceMS)
 }
 
-func (p *Peer) writeLoop(ctx context.Context, writer io.Writer, state *callState) (string, []byte, []UtteranceLog) {
+func (p *Peer) writeLoop(ctx context.Context, writer io.Writer, dtmf *diago.DTMFWriter, state *callState) (string, []byte, []UtteranceLog) {
 	script := p.cfg.Script
 	silence := make([]byte, frameBytes)
 	var sent []byte
@@ -436,6 +443,25 @@ func (p *Peer) writeLoop(ctx context.Context, writer io.Writer, state *callState
 				ready = time.Since(lastUtteranceEnd) >= time.Duration(u.DelayMS)*time.Millisecond
 			default:
 				ready = state.botIdle(script.BotSilenceMS)
+			}
+			if ready && u.Digits != "" {
+				// Keypad entry: events go out on their own RTP payload type;
+				// the lock is released while each key's events are paced.
+				logs = append(logs, UtteranceLog{Name: u.Name, Mode: u.Mode, StartMS: now, BotSpeakingAtStart: state.botSpeaking})
+				state.mu.Unlock()
+				for _, key := range u.Digits {
+					if err := dtmf.WriteDTMF(key); err != nil {
+						return "dtmf_failed", sent, logs
+					}
+				}
+				state.mu.Lock()
+				logs[len(logs)-1].EndMS = state.nowMS()
+				index++
+				state.botSpokeSince = false
+				waitStart = time.Now()
+				lastUtteranceEnd = time.Now()
+				state.mu.Unlock()
+				continue
 			}
 			if ready {
 				playing = true

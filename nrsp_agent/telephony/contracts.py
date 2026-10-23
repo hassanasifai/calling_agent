@@ -17,6 +17,8 @@ class CallEventType(StrEnum):
     FAILED = "FAILED"
     RTP_READY = "RTP_READY"
     RTP_LOST = "RTP_LOST"
+    # One RFC 2833 keypad key pressed by the remote party.
+    DTMF = "DTMF"
 
 
 class CallHandle(BaseModel):
@@ -35,6 +37,7 @@ class CallEvent(BaseModel):
     reason: str | None = Field(default=None, max_length=256)
     sip_status: int | None = Field(default=None, ge=100, le=699)
     codec: str | None = Field(default=None, max_length=32)
+    digit: str | None = Field(default=None, pattern=r"^[0-9*#]$")
 
 
 class AudioFrame(BaseModel):

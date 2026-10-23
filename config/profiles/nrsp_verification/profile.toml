@@ -4,10 +4,13 @@
 # private cnic_last4, amount_spoken, due_date_spoken (never sent to the model).
 name = "nrsp_installment_verification"
 language = "ur"
+# Measured over G.711: aegis_female ASR-intelligibility CER 3.8% vs 8.7% for
+# ur_PK-fasih-medium at the same synthesis cost (scripts/benchmark_tts.py).
+tts_voice = "ur_PK-aegis_female-medium"
 persona = """You are the automated voice assistant of NRSP (National Rural \
 Support Programme), a Pakistani microfinance organisation, speaking on the \
 phone with a borrower. You are polite, warm, patient and brief, like a \
-helpful Pakistani call-centre officer. The voice is male: use masculine \
+helpful Pakistani call-centre officer. The voice is female: use feminine \
 first-person Urdu verbs."""
 objective = """Confirm you are speaking with {customer_name}, verify their \
 identity with the last four digits of their CNIC, then remind them of their \
@@ -28,11 +31,11 @@ reply_forbidden_terms = ["ہزار", "لاکھ", "کروڑ", "روپے", "روپ
   "مہلت", "توسیع", "رعایت", "معاف", "جرمانہ", "مزید وقت", "وقت دے"]
 max_turns = 16
 
-greeting = "السلام علیکم۔ میں این آر ایس پی کی طرف سے ایک خودکار اے آئی معاون بات کر رہا ہوں۔"
+greeting = "السلام علیکم۔ میں این آر ایس پی کی طرف سے ایک خودکار اے آئی معاون بات کر رہی ہوں۔"
 greeting_ask = "کیا میری بات {customer_name} سے ہو رہی ہے؟"
 silence_prompt = "کیا آپ میری آواز سن رہے ہیں؟"
 no_response = "لگتا ہے آپ کی آواز نہیں آ رہی۔ ہم آپ سے بعد میں دوبارہ رابطہ کریں گے۔ اللہ حافظ۔"
-repeat_request = "معذرت، میں آپ کی بات ٹھیک سے سمجھ نہیں سکا۔"
+repeat_request = "معذرت، میں آپ کی بات ٹھیک سے سمجھ نہیں سکی۔"
 unclear_close = "معذرت، رابطے میں مشکل ہو رہی ہے۔ ہم آپ سے بعد میں دوبارہ رابطہ کریں گے۔ اللہ حافظ۔"
 readback = "آپ نے {digits_spoken} بتایا، کیا یہ درست ہے؟"
 
@@ -40,7 +43,7 @@ readback = "آپ نے {digits_spoken} بتایا، کیا یہ درست ہے؟"
 anything_else = "کیا آپ کچھ اور پوچھنا چاہیں گے؟"
 installment_notice = "آپ کی {amount_spoken} روپے کی قسط {due_date_spoken} کو واجب الادا ہے۔"
 pay_on_time = "کیا آپ مقررہ تاریخ تک ادائیگی کر سکیں گے؟"
-ask_cnic = "تصدیق کے لیے براہِ کرم اپنے شناختی کارڈ نمبر کے آخری چار ہندسے بتائیں۔"
+ask_cnic = "تصدیق کے لیے براہِ کرم اپنے شناختی کارڈ نمبر کے آخری چار ہندسے بتائیں، یا فون کے بٹن سے درج کریں۔"
 
 [asr_prompts]
 # Domain nouns only: intent words in prompts were measured being hallucinated.
@@ -150,7 +153,7 @@ action = "confirm_identity"
 [[examples]]
 caller = "aap kis silsilay mein call kar rahe hain?"
 action = "reply"
-say = "میں این آر ایس پی کا خودکار معاون ہوں اور آپ کے قرض کے سلسلے میں بات کرنا چاہتا ہوں۔"
+say = "میں این آر ایس پی کا خودکار معاون ہوں اور آپ کے قرض کے سلسلے میں بات کرنا چاہتی ہوں۔"
 
 [[examples]]
 caller = "یہ میری بیوی کا نمبر ہے، وہ ابھی گھر پر نہیں"
@@ -189,7 +192,7 @@ context = "verified"
 caller = "is dafa kaam nahi mila, mushkil hai"
 action = "record_difficulty"
 value = "کام نہیں ملا"
-say = "میں آپ کی مشکل سمجھتا ہوں، آپ نے بتایا اس کا شکریہ۔"
+say = "میں آپ کی مشکل سمجھتی ہوں، آپ نے بتایا اس کا شکریہ۔"
 
 [[examples]]
 context = "verified"
@@ -218,3 +221,18 @@ action = "callback"
 context = "verified"
 caller = "نہیں جی بس، شکریہ"
 action = "finish"
+
+[[examples]]
+context = "you asked a yes/no confirmation question"
+caller = "جی، یہی بات ہے"
+action = "affirm"
+
+[[examples]]
+context = "you asked whether [customer_name] cannot talk right now"
+caller = "ہاں جی"
+action = "affirm"
+
+[[examples]]
+context = "you asked whether [customer_name] cannot talk right now"
+caller = "nahi nahi, main hi hoon"
+action = "reject"

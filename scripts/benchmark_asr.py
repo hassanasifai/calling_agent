@@ -22,15 +22,20 @@ import numpy as np
 import psutil
 from jiwer import cer, wer
 
-from nrsp_agent.conversation import script
-from nrsp_agent.conversation.policy import (
-    detect_intent,
-    digits_match,
-    extract_digits,
-    normalize,
-)
+from nrsp_agent.agent.profile import load_profile
+from nrsp_agent.agent.textnorm import extract_digits, normalize
+from nrsp_agent.devtools.fixtures import NRSP_PROFILE
 
-TERMINAL = {"opt_out", "handoff", "goodbye"}
+PROMPTS = load_profile(NRSP_PROFILE)[0].asr_prompts
+
+
+def digits_ok(text: str, expected: str) -> bool:
+    """The engine's rule: exactly the digits, or up to two extra leading
+    ones (count words) trimmed before read-back."""
+    digits = extract_digits(text)
+    if len(expected) < len(digits) <= len(expected) + 2:
+        digits = digits[-len(expected) :]
+    return digits == expected
 
 
 def read_wav(path: Path) -> np.ndarray:
@@ -53,11 +58,7 @@ def load_whisper(path: str, threads: int, beam: int, prompts: bool):
     def run(audio: np.ndarray, stage: str | None, max_tokens: int) -> str:
         prompt = None
         if prompts and stage:
-            prompt = (
-                script.ASR_PROMPT_DIGITS
-                if stage == "verify"
-                else (script.ASR_PROMPT_DOMAIN)
-            )
+            prompt = PROMPTS["digits" if stage == "verify" else "default"]
         segments, _ = model.transcribe(
             audio,
             language="ur",
@@ -132,7 +133,7 @@ def main() -> None:
     for set_name in args.sets.split(","):
         rows = json.loads((args.eval / set_name / "manifest.json").read_text("utf-8"))
         lat, audio_s, refs, hyps = [], 0.0, [], []
-        intent_ok = intent_n = digit_ok = digit_n = false_terminal = 0
+        digit_ok = digit_n = 0
         halluc = []
         for row in rows:
             audio = read_wav(args.eval / set_name / row["wav"])
@@ -151,12 +152,7 @@ def main() -> None:
             hyps.append(normalize(hyp) or "∅")
             if row.get("digits"):
                 digit_n += 1
-                digit_ok += digits_match(extract_digits(hyp), row["digits"])
-            elif row.get("intent"):
-                got = detect_intent(hyp).value
-                intent_n += 1
-                intent_ok += got == row["intent"]
-                false_terminal += got in TERMINAL and got != row["intent"]
+                digit_ok += digits_ok(hyp, row["digits"])
         stats = {
             "n": len(rows),
             "lat_p50_s": percentile(lat, 50),
@@ -171,9 +167,7 @@ def main() -> None:
             stats["wer"] = round(wer(refs, hyps), 4)
             stats["cer"] = round(cer(refs, hyps), 4)
         if set_name == "domain":
-            stats["intent_acc"] = f"{intent_ok}/{intent_n}"
             stats["digit_acc"] = f"{digit_ok}/{digit_n}"
-            stats["false_terminal_intents"] = false_terminal
         report[set_name] = stats
         print(json.dumps({set_name: stats}, ensure_ascii=False), flush=True)
     cpu1 = proc.cpu_times()

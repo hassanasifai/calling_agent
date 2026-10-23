@@ -36,6 +36,10 @@ UTTERANCES: dict[str, str] = {
     "pay_sure": "جی بالکل، میں ادائیگی کر دوں گا۔",
     "deposit_next_week": "جی، میں اگلے ہفتے قسط جمع کرا دوں گا۔",
     "payment_difficulty": "ابھی میرے پاس پیسے نہیں ہیں۔",
+    # Answers to the engine's confirmation questions (digit read-back,
+    # confirming an opt-out, handoff or wrong person).
+    "yes_correct": "جی ہاں، یہ درست ہیں۔",
+    "yes": "جی ہاں۔",
 }
 
 
@@ -61,12 +65,20 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--voice", default="data/models/piper/ur_PK-fasih-medium.onnx")
     parser.add_argument("--out", default="tests/fixtures/caller")
+    parser.add_argument("--only", nargs="*", help="regenerate just these names")
     args = parser.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     voice = PiperVoice.load(args.voice)
-    manifest = {}
+    manifest_path = out / "manifest.json"
+    manifest = (
+        json.loads(manifest_path.read_text(encoding="utf-8"))
+        if args.only and manifest_path.exists()
+        else {}
+    )
     for seed, (name, text) in enumerate(UTTERANCES.items()):
+        if args.only and name not in args.only:
+            continue
         samples = synthesize(voice, text, seed)
         with wave.open(str(out / f"{name}.wav"), "wb") as wav:
             wav.setnchannels(1)

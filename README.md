@@ -60,6 +60,31 @@ The model benchmark downloads only local model weights into the ignored
 `config/server.toml` is the starting Windows Server profile and must be sized
 with target-server benchmarks.
 
+## Agent profiles (task configuration)
+
+A call's behaviour comes from a profile directory, not from code:
+`config/profiles/nrsp_verification/` holds `profile.toml` (persona, objective,
+rules, actions, approved texts, examples, voice, ASR prompts) and knowledge
+files. Call data is passed per call; only `public_fields` are shown to the
+LLM. Build an engine with `nrsp_agent.agent.build_engine(profile_dir, data)`
+and pass it to `run_outbound_session(..., engine=...)`. See
+`tests/fixtures/profiles/clinic_reminder/` for a second, unrelated task.
+
+## Ubuntu development (CPU, no services)
+
+```bash
+uv venv --python 3.13 .venv && uv pip install -e '.[dev,voice-engine]'
+scripts/convert_asr_model.sh          # whisper-small-urdu -> CTranslate2 int8
+scripts/run_llm_server.sh &           # llama.cpp, loopback :18431, Gemma-4-E2B
+python -m nrsp_agent.devtools.loopback all --profile config/ubuntu-dev.toml
+NRSP_E2E=1 NRSP_VOICE_CONFIG=config/ubuntu-dev.toml pytest tests/e2e -q --no-cov
+```
+
+Benchmarks (run sequentially; `scripts/pressure_check.sh` gates heavy work):
+`build_asr_eval.py`, `benchmark_asr.py`, `benchmark_llm_turns.py`,
+`simulate_dialogues.py`, `benchmark_e2e_understanding.py`, `benchmark_tts.py`.
+Results and decisions: `PROGRESS.md`, `DECISIONS.md` (ADR-007..010).
+
 ## Bridge configuration
 
 Copy `config/.env.example` to an untracked `.env`, then set secrets locally.
