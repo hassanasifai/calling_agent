@@ -29,14 +29,31 @@ LLAMA = Path(".cache/llama.cpp/b11516/llama-b11516/llama-server")
 
 
 def engine_at(stage: str) -> CallEngine:
+    """Put the engine where the labelled turn happens, via its own actions.
+
+    identity: greeting asked for the customer; confirm_wrong: the wrong-person
+    confirmation is pending; verify: CNIC digits requested; readback: digits
+    read back (yes/no pending); discuss: verified, pay-on-time asked;
+    closing: promise recorded, "anything else?" asked."""
     engine = build_engine(NRSP_PROFILE, TEST_CALL_DATA)
     engine.greeting()
-    if stage in ("verify", "discuss"):
+    if stage == "confirm_wrong":
+        engine.on_model("wrong_person", "", "نہیں")
+    if stage in ("verify", "readback", "discuss", "closing"):
         engine.on_model("confirm_identity", "", "جی")
-    if stage == "discuss":
+    if stage in ("readback", "discuss", "closing"):
         engine.on_model("verify_cnic", "", "چار پانچ چھ سات")
+    if stage in ("discuss", "closing"):
         engine.on_model(AFFIRM, "", "جی")
+    if stage == "closing":
+        engine.on_model("record_promise", "مقررہ تاریخ تک", "جی کر دوں گا")
     return engine
+
+
+def accepted(item: dict) -> list[str]:
+    """A label is one action or a list of equally acceptable ones."""
+    action = item["action"]
+    return action if isinstance(action, list) else [action]
 
 
 def start_server(binary: Path, model: Path, port: int, threads: int):
@@ -156,7 +173,7 @@ def main() -> None:
                     "ttft": ttft,
                     "action_s": action_s,
                     "total": total,
-                    "ok": out["action"] == item["action"],
+                    "ok": out["action"] in accepted(item),
                     "reply_ok": (not reply_needed)
                     or screen_sentence(
                         say, profile.reply_forbidden_terms, profile.reply_allow_digits
@@ -166,7 +183,7 @@ def main() -> None:
             )
             r = rows[-1]
             print(
-                f"{'OK ' if r['ok'] else 'BAD'} {item['action']:>17} -> "
+                f"{'OK ' if r['ok'] else 'BAD'} {'|'.join(accepted(item)):>17} -> "
                 f"{r['got']:<17} {action_s:.2f}s {total:.2f}s | {item['text']} | "
                 f"{say[:90]}",
                 flush=True,
@@ -184,7 +201,9 @@ def main() -> None:
         "action_acc": round(sum(r["ok"] for r in rows) / len(rows), 3),
         "reply_guard_pass": f"{sum(r['reply_ok'] for r in rows)}/{len(rows)}",
         "false_terminal": sum(r["got"] in terminal and not r["ok"] for r in rows),
-        "missed_terminal": sum(r["action"] in terminal and not r["ok"] for r in rows),
+        "missed_terminal": sum(
+            any(a in terminal for a in accepted(r)) and not r["ok"] for r in rows
+        ),
     }
     for key in ("ttft", "action_s", "total"):
         values = [r[key] for r in rows]

@@ -189,9 +189,9 @@ def warm_ollama(settings: LocalVoicePipelineSettings) -> float:
         }
     ).encode()
     request = urllib.request.Request(
-        f"{settings.ollama_base_url}/chat/completions",
+        f"{settings.llm_base_url}/chat/completions",
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **settings.auth_headers()},
         method="POST",
     )
     started = time.perf_counter()

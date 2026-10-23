@@ -1,0 +1,9 @@
+[Unit]
+Description=Urdu calling agent inference (shares the VM with Financial AI)
+
+[Slice]
+# Hard caps for everything we run: Financial AI keeps the rest of the VM.
+CPUQuota=600%
+MemoryMax=12G
+MemoryHigh=10G
+TasksMax=512

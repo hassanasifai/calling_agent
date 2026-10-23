@@ -77,7 +77,11 @@ async def run_outbound_session(
         )
 
     prewarm = asyncio.create_task(
-        agent.prewarm_llm(voice_settings.ollama_base_url, voice_settings.llm_model)
+        agent.prewarm_llm(
+            voice_settings.llm_base_url,
+            voice_settings.llm_model,
+            voice_settings.auth_headers(),
+        )
     )
     await port.start_call(number, gateway_id, call_id)
     events = port.events(call_id)
@@ -88,6 +92,7 @@ async def run_outbound_session(
             if media_event.event == CallEventType.FAILED
             else SessionResultType.REMOTE_HANGUP
         )
+        await agent.aclose()
         return result(kind, media_event, media_event.reason)
 
     runner = WorkerRunner(handle_sigint=False)
@@ -136,6 +141,7 @@ async def run_outbound_session(
     finally:
         if not prewarm.done():
             prewarm.cancel()
+        await agent.aclose()
         if not terminal_task.done():
             terminal_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

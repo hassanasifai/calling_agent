@@ -1,0 +1,44 @@
+{"stage": "identity", "category": "short", "text": "جی", "action": "confirm_identity"}
+{"stage": "identity", "category": "short", "text": "haan", "action": "confirm_identity"}
+{"stage": "identity", "category": "code_switch", "text": "yes speaking, boliye", "action": "confirm_identity"}
+{"stage": "identity", "category": "asr_garbled", "text": "کی ہند میں احمد علی بات کر رہا", "action": "confirm_identity"}
+{"stage": "identity", "category": "asr_garbled", "text": "یہ ہاں میں احمد علی بات کر رہا", "action": "confirm_identity"}
+{"stage": "identity", "category": "correction", "text": "جی... نہیں نہیں، میں ان کا بیٹا بول رہا ہوں", "action": "wrong_person"}
+{"stage": "identity", "category": "unexpected", "text": "میں ان کا بھائی ہوں، بتائیں کیا کام ہے", "action": "wrong_person"}
+{"stage": "identity", "category": "unexpected", "text": "ابھی گاڑی چلا رہا ہوں، بعد میں فون کریں", "action": "callback"}
+{"stage": "identity", "category": "followup", "text": "kaun bol raha hai? kis silsilay mein?", "action": "reply"}
+{"stage": "identity", "category": "noise", "text": "ہیلو؟ ہیلو؟", "action": "reply"}
+{"stage": "confirm_wrong", "category": "short", "text": "جی ہاں", "action": "affirm"}
+{"stage": "confirm_wrong", "category": "correction", "text": "نہیں نہیں میں ہی احمد ہوں", "action": "reject"}
+{"stage": "verify", "category": "natural", "text": "ایک منٹ... جی، دو آٹھ پانچ ایک", "action": "verify_cnic"}
+{"stage": "verify", "category": "code_switch", "text": "char paanch chay saat", "action": "verify_cnic"}
+{"stage": "verify", "category": "followup", "text": "کون سے ہندسے؟ پورا نمبر چاہیے؟", "action": "reply"}
+{"stage": "verify", "category": "unexpected", "text": "یہ تو میں کسی کو نہیں بتاتا", "action": "reply"}
+{"stage": "verify", "category": "unexpected", "text": "مجھے کسی بندے سے بات کرنی ہے", "action": "human_handoff"}
+{"stage": "verify", "category": "unexpected", "text": "میرا نمبر ہٹا دیں، دوبارہ فون نہ کریں", "action": "opt_out"}
+{"stage": "readback", "category": "short", "text": "جی", "action": "affirm"}
+{"stage": "readback", "category": "short", "text": "ہاں ٹھیک ہے", "action": "affirm"}
+{"stage": "readback", "category": "code_switch", "text": "ji bilkul sahi", "action": "affirm"}
+{"stage": "readback", "category": "correction", "text": "نہیں، آخری والا نو ہے", "action": ["reject", "verify_cnic"]}
+{"stage": "readback", "category": "short", "text": "nahi galat hai", "action": "reject"}
+{"stage": "discuss", "category": "natural", "text": "جی ان شاء اللہ", "action": "record_promise"}
+{"stage": "discuss", "category": "code_switch", "text": "haan kar dunga time pe", "action": "record_promise"}
+{"stage": "discuss", "category": "natural", "text": "دس تاریخ کو تنخواہ آئے گی، پھر جمع کروا دوں گا", "action": "record_promise"}
+{"stage": "discuss", "category": "short", "text": "ok g", "action": "record_promise"}
+{"stage": "discuss", "category": "natural", "text": "شاید، کوشش کروں گا", "action": ["record_promise", "record_difficulty"]}
+{"stage": "discuss", "category": "natural", "text": "مشکل ہے، فصل ابھی نہیں بکی", "action": "record_difficulty"}
+{"stage": "discuss", "category": "natural", "text": "تھوڑا وقت مل سکتا ہے؟", "action": "record_difficulty"}
+{"stage": "discuss", "category": "followup", "text": "کتنی رقم ہے، دوبارہ بتائیں", "action": "tell_installment"}
+{"stage": "discuss", "category": "followup", "text": "kis tareekh ko?", "action": "tell_installment"}
+{"stage": "discuss", "category": "followup", "text": "جمع کہاں کرانی ہے؟", "action": "reply"}
+{"stage": "discuss", "category": "unexpected", "text": "آپ کون ہیں دوبارہ بتائیں", "action": "reply"}
+{"stage": "discuss", "category": "asr_garbled", "text": "ٹھیک ہے، شکریہ، میں لا حافظ", "action": ["record_promise", "finish"]}
+{"stage": "discuss", "category": "unexpected", "text": "manager se baat karwao", "action": "human_handoff"}
+{"stage": "closing", "category": "natural", "text": "نہیں جی، کچھ نہیں", "action": "finish"}
+{"stage": "closing", "category": "code_switch", "text": "bas shukriya, Allah Hafiz", "action": "finish"}
+{"stage": "closing", "category": "natural", "text": "اچھا جی خدا حافظ", "action": "finish"}
+{"stage": "closing", "category": "short", "text": "نہیں", "action": "finish"}
+{"stage": "closing", "category": "short", "text": "شکریہ آپ کا", "action": "finish"}
+{"stage": "closing", "category": "followup", "text": "جی ایک بات، اگلا قرض کب ملے گا؟", "action": "reply"}
+{"stage": "closing", "category": "followup", "text": "قسط کتنی تھی؟", "action": "tell_installment"}
+{"stage": "closing", "category": "unexpected", "text": "آئندہ مجھے فون مت کرنا", "action": "opt_out"}

@@ -35,7 +35,7 @@ installment reminder with identity verification is the first profile.
 - Tests: Python 78 passed / 9 skipped (E2E opt-in, Windows-only); Go `go test
   ./...` passes (bridge + media integration incl. new DTMF reader wiring).
 
-## Currently working on — reliability + latency pass (2026-10-23, later)
+## Reliability + latency pass (2026-10-23, later) — done
 Sequential: reproduce -> diagnose -> minimal fix -> test -> measure.
 
 ### Diagnosed (offline replay of recorded call audio, `scripts/replay_vad.py`)
@@ -77,7 +77,139 @@ seconds after VAD stop, n=16): ASR 2.69 P50 / 3.36 P95; LLM first token 5.01 /
 
 Tests after fixes 1-3: Python 78 passed / 9 skipped.
 
+5. **LLM prefix prefill (latency, implemented).** On a quiet host prompt cost
+   is per token (~26 ms/token, 5 threads; an identical repeat costs 0.18 s —
+   the earlier 3 s single-token requests were host contention). The model's
+   own last output (~23 tokens) is re-processed every turn: grammar-constrained
+   decoding emits non-canonical token splits, so it never matches the
+   re-tokenised history (template verified consistent). Everything except the
+   caller's words is known when the bot's reply is decided, so
+   `ConversationController` now sends that prefix (system + history +
+   `CallEngine.turn_prefix()`) to the server while the bot speaks
+   (`llm_prefill = true`, configurable). `scripts/probe_llm_cache.py`, 4 turns:
+   first token 2.18-2.65 s -> 0.79-1.10 s; prompt tokens on the turn 66-90 ->
+   11-23; same actions chosen. `turn_message` output is byte-identical.
+6. `nrsp_agent/devtools/live_call.py`: thin runner for ONE session through an
+   already running bridge (the runbook's missing step). Not run against a real
+   PBX (not authorized).
+
+### SIP/RTP loopback after fixes 1-5 (`.tmp/e2e_fix1`, `.tmp/loopback_fix1.log`)
+**9/9 scenarios reached the correct outcome** (before: 7/9): happy_path,
+keypad_verification (DTMF), barge_in, opt_out, wrong_person, handoff, silence,
+remote_hangup_mid_turn, rtp_loss. Media: 0 dropped caller frames.
+Latency, peer clock, caller end of speech -> first bot audio, n=18:
+**P50 5.92 s, P95 10.02 s, max 11.12 s** (before: P50 8.1, P95 11.7).
+Per stage after VAD stop (n=18): ASR 2.52 P50 / 2.99 P95; LLM first token
+3.17 / 3.82 (was 5.01 / 6.27); TTS start 4.40 / 8.48 (was 7.28 / 9.89).
+The slow tail is turns where the model writes its own reply ("say"): the reply
+is generated at ~8-10 tok/s before the first sentence can be spoken.
+barge_in: the peer reported no `bot_stop_ms` because the caller started in a
+pause between greeting sentences (2620-3023 ms); the bot resumed and stopped at
+3560 ms, i.e. 740 ms after caller onset (600 ms before) — measurement gap in
+the peer's annotate(), not a regression.
+Remaining understanding miss: barge_in's last caller turn "ٹھیک ہے، شکریہ،
+میں لا حافظ" (ASR of "...اللہ حافظ") was recorded as payment difficulty
+(previous run: an off-topic model reply) — an LLM decision error.
+
+### LLM decision reliability (new held-out set, nothing adopted)
+New set `tests/fixtures/intent/conversational.jsonl` (44 turns: short replies,
+corrections, Roman Urdu/code-switching, garbled ASR from the failed runs,
+unexpected answers, follow-up questions, closings) with the bot's real pending
+question per stage (new benchmark stages readback / closing / confirm_wrong;
+a label may list equally acceptable actions). Gemma-4-E2B, 5 threads:
+**baseline 36/44 = 81.8 %**. Worst error: during the wrong-person
+confirmation "نہیں نہیں میں ہی احمد ہوں" -> affirm (would end a call with the
+right person). Others: garbled identity / "ہیلو؟ ہیلو؟" -> wrong_person
+(caught by the confirmation), clarifying questions during verification ->
+verify_cnic (code finds no digits and re-asks), loan questions ->
+tell_installment. Closings are correct (5/5) once "anything else?" was asked;
+the old dev/held-out "finish" misses are mostly labelled under the
+pay-on-time question, where "نہیں ..." legitimately reads as difficulty.
+Tried: generic reject wording ("or contradicts what you asked") + narrower
+NRSP tell_installment description -> conversational 84.1 %, but held-out
+82.1 -> 76.9 % and dev 75 -> 70 %. **Reverted** (no net improvement).
+
+## Remote inference deployment: VM API + one-click Windows calling (2026-10-23)
+Architecture (no SSH tunnel, no Docker, no new framework, no reboot):
+- **VM 10.20.30.111** runs all inference permanently as *user* systemd units
+  in `calling-ai.slice` (CPUQuota 600 %, MemoryMax 12 G, Nice 5, Restart=always):
+  `calling-llm.service` (existing `scripts/run_llm_server.sh`, llama.cpp on
+  127.0.0.1:18431, 5 threads) and `calling-api.service`
+  (`nrsp_agent/inference_api.py`, aiohttp, bound to **10.20.30.111:18440 only**):
+  `GET /health`, `POST /v1/asr` (PCM16 16 kHz -> text; same
+  `transcribe_pcm16()` decoding as local mode), `POST /v1/tts` (Piper aegis,
+  streamed WAV per sentence), `/v1/chat/completions` + `/v1/models` proxied to
+  the loopback llama-server. Every request: Bearer token (constant-time
+  compare) + client IP allowlist; body/text/prompt size caps; one ASR and one
+  TTS job at a time; upstream timeouts. Financial AI services untouched.
+- **Windows laptop** runs Go/Diago, Pipecat orchestration and Silero VAD only
+  (`[voice] inference = "remote"`): `RemoteWhisperSTTService` (subclass of the
+  existing Whisper service, keeps the engine's per-turn ASR prompt switch),
+  Pipecat's own `PiperHttpTTSService`, the existing OpenAI-compatible LLM client
+  (token as api_key); prewarm/prefill send the token too. No model weights are
+  loaded. `remote_api_url` must be `http://<private IP literal>:<port>`
+  (hostnames/public IPs rejected); the token comes from `NRSP_INFERENCE_TOKEN`.
+- `start-calling.ps1` (repo root): config check -> VPN TCP check -> API
+  `/health` with token -> bridge with live calls **disabled** + SIP
+  registration check -> profile menu (`config/profiles/*`, plus
+  `config/local/profiles/*`) -> fictional test data (`test_call.example.json`
+  in each profile, copied to `config/local/test-call.<profile>.json`) -> exact
+  dial string + typed phrase `CALL <number>` -> bridge restarted allowlisted
+  for that one number -> `nrsp_agent.devtools.live_call` (warms the profile's
+  system prompt, runs one session) -> bridge stopped -> result JSON,
+  pipeline.log, bridge logs and `latency.txt` in `.tmp\live\<timestamp>\`.
+  `-CheckOnly` stops after the SIP check.
+
+### Verified on the VM (2026-10-23)
+- `scripts/vm/setup.sh 25.1.0.114/32` (25.1.0.114 = the only current VPN
+  client, the VNC session): units enabled + started; linger already `yes`.
+  `config/local/` (token file mode 600) is Git-ignored. For the tests below
+  `10.20.30.111/32` was added to `allowed_clients` (remove it if unwanted;
+  then `ctl.sh health` reports "client not allowed", which is expected).
+- Security tests (`tests/test_inference_api.py`, 17): no/wrong token -> 401,
+  client outside allowlist -> 403, public bind / 0.0.0.0/0 allowlist / public
+  or hostname client URL refused, path-like voice and oversize text -> 400.
+  Live: the VM's own address was refused (403) before it was allowlisted.
+- Crash recovery: `kill -9` of both service processes -> both active and
+  `/health` ok again after 11 s (NRestarts=1).
+- **Boot start: NOT verified by reboot** (forbidden). It relies on the units
+  being enabled under `default.target` with linger = yes.
+- All 9 SIP/RTP loopback scenarios with the client in **remote mode** (no
+  weights loaded, all inference over 10.20.30.111:18440): 8/9 correct;
+  keypad_verification ended wrong_person on the known ASR/LLM miss (Whisper:
+  "یہ ہند میں احمد علی بات کر رہا"; Gemma -> wrong_person), not remote-specific.
+  Latency caller end -> first bot audio, n=17: **P50 5.30 s, P95 6.36 s,
+  max 8.60 s**. Client ASR round trip 2.301 s P50 vs server decode 2.299 s;
+  client LLM first token 0.63 s P50 (prefill works through the proxy); TTS
+  first audio 0.44 s P50 (client) / server 0.438 s. Network overhead on the
+  VM itself ~0; **over the real VPN it is UNVERIFIED** (measure from Windows).
+- Launcher Python path against the loopback PBX with the **clinic profile**
+  (unchanged engine, remote inference): `live_call --check-only` ->
+  `sip_registered=true`; one call -> outcome completed (identity_ok,
+  attendance_known) despite garbled ASR; reply latency 4.0-5.5 s; 0 RTP gaps.
+- `start-calling.ps1` itself was **not executed** (no PowerShell on the VM).
+
+### Exact setup
+VM (once; idempotent; no sudo, no reboot):
+```bash
+cd ~/calling_agent
+scripts/vm/setup.sh 25.1.0.114/32     # laptop's VPN address/CIDR
+scripts/vm/ctl.sh status              # start|stop|restart|status|logs|health
+cat config/local/vm-api.env           # token to copy to the laptop
+```
+Allowed clients: edit `config/local/vm-api.toml`, then
+`systemctl --user restart calling-api.service`.
+
+Windows (once): pull this repo version, `scripts\setup.ps1`, then run
+`.\start-calling.ps1` — the first run creates `config\local\windows.toml`
+(API URL), `config\local\windows.env` (paste `NRSP_INFERENCE_TOKEN=...`) and
+`config\local\bridge.env` (PBX 192.168.100.5, extension 100 + password,
+`NRSP_SIP_BIND_HOST` = laptop LAN IP) and stops; fill them in and run again.
+`.\start-calling.ps1 -CheckOnly` verifies VPN, API and SIP without calling.
+
 ## Remaining tasks (priority)
+0. On Windows: run `.\start-calling.ps1 -CheckOnly` (UNVERIFIED: PowerShell
+   script, VPN latency, SIP registration), then ONE authorized Jazz call.
 1. Windows: pick the Ollama tag for Gemma-4-E2B (or run llama-server), confirm
    the ZTE/Jazz gateway forwards RFC 2833 DTMF, re-measure latency there.
 2. Real recorded Pakistani telephone speech for an accuracy set (needs data).
@@ -95,8 +227,11 @@ Tests after fixes 1-3: Python 78 passed / 9 skipped.
 - CPU latency: end of caller speech → first bot audio is ~6.5–9 s on this
   contended host (target <2 s **not met**). Dominant costs: ASR ~2.7 s, LLM
   ~2.5–3 s to the action. A GPU server or dedicated CPU would cut both.
-- Ollama not installed on this VM (no services allowed); llama.cpp server on
-  loopback port 18431 via `scripts/run_llm_server.sh` instead.
+- llama.cpp server on loopback 18431 now runs permanently as the user unit
+  `calling-llm.service` (behind the private API); Ollama is not needed.
+- Open understanding misses: garbled identity answers -> wrong_person
+  (confirmation catches it, but a scripted caller then says "جی ہاں"), and
+  ~1.7 % of short answers after a pause missed by VAD in stress replay.
 
 ## Benchmarks (all sequential, pressure-gated)
 ### ASR — telephone band (8 kHz G.711 A-law), 4 threads
@@ -139,7 +274,13 @@ Keep Go/Diago + Pipecat + Silero; profile-driven engine; LLM decides, code
 validates; constrained JSON; confirmations for irreversible endings; keypad
 verification; cross-call-static prompts; no new services.
 
-## Latest test results
+## Latest test results (2026-10-23, after the reliability pass + remote API)
+- Python 96 passed, 9 skipped (coverage 80.0 %); ruff/black clean; Go
+  `go test ./...` passes.
+- Loopback local mode 9/9; remote mode 8/9 (known understanding miss); clinic
+  profile via launcher path: completed. Latency P50 5.3-5.9 s, P95 6.4-10.0 s.
+
+## Earlier test results
 - Python 78 passed, 9 skipped; ruff/black clean. Go `go test ./...` passes.
 - SIP/RTP loopback, final run: 7/9 scenarios pass (happy_path, barge_in,
   wrong_person, handoff, silence, remote hang-up, RTP loss). keypad_verification
@@ -151,5 +292,8 @@ verification; cross-call-static prompts; no new services.
   NOT met on this shared CPU.
 
 ## Immediate next action
-Windows integration check (Ollama model tag, DTMF through the ZTE gateway) and
-a real-speech accuracy set; both need resources outside this VM.
+On the Windows laptop (user action): pull, `scripts\setup.ps1`, fill the three
+`config\local` files, `.\start-calling.ps1 -CheckOnly`, then one explicitly
+authorized Jazz call; send back `.tmp\live\<timestamp>\`. Real-phone
+behaviour (DTMF through the ZTE gateway, echo/barge-in, VPN latency) is
+UNVERIFIED until then.

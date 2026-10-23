@@ -4,6 +4,29 @@ Status: prepared, **not executed**. A real call requires the project owner's
 explicit authorization for one exact test number. Nothing below changes the
 miniSIPServer, MicroSIP or ZTE configuration.
 
+## Current flow (2026-10-23): remote inference + one-click launcher
+
+All ASR/LLM/TTS run on the VM API (`http://10.20.30.111:18440`, over the
+existing VPN); the laptop runs only the bridge, Pipecat and VAD. The local
+Ollama/RAM steps in the preflight below are superseded.
+
+```powershell
+Set-Location D:\calling            # this repository, current version
+powershell -ExecutionPolicy Bypass -File scripts\setup.ps1   # once
+.\start-calling.ps1 -CheckOnly      # VPN, API /health, SIP registration; no call
+.\start-calling.ps1                 # profile -> test data -> "CALL <number>" -> one call
+```
+
+First run creates `config\local\windows.toml`, `windows.env` (token from the
+VM's `config/local/vm-api.env`) and `bridge.env` (PBX, extension 100 secret,
+`NRSP_SIP_BIND_HOST` = laptop LAN IP) and stops so you can fill them in. Close
+MicroSIP first (same extension). The launcher enables live calls only for the
+one number you typed and stops the bridge after the call. Results:
+`.tmp\live\<timestamp>\` (result JSON, pipeline.log, bridge logs,
+latency.txt). If the API check fails: VPN up? on the VM
+`scripts/vm/ctl.sh status`; is the laptop's VPN address in the VM's
+`config/local/vm-api.toml` `allowed_clients`?
+
 ## Path under test
 
 ```text

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import os
 import threading
 import time
@@ -11,8 +12,10 @@ import wave
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import quote, urlsplit
 
+import aiohttp
 import numpy as np
 import pipecat.services.piper.tts as piper_tts
 from faster_whisper import WhisperModel
@@ -32,7 +35,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMUserAggregatorParams,
 )
 from pipecat.services.ollama.llm import OLLamaLLMService
-from pipecat.services.piper.tts import PiperTTSService
+from pipecat.services.piper.tts import PiperHttpTTSService, PiperTTSService
 from pipecat.services.whisper.stt import WhisperSTTService
 from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import BaseTransport
@@ -74,6 +77,13 @@ class LocalVoicePipelineSettings(BaseModel):
     # Any loopback OpenAI-compatible server: Ollama (Windows) or llama.cpp's
     # llama-server (Ubuntu). Both cache the static system-prompt prefix.
     ollama_base_url: str = "http://127.0.0.1:11434/v1"
+    # "remote": ASR, LLM and TTS run on the private inference API
+    # (nrsp_agent.inference_api on the VM); this process loads no weights.
+    inference: Literal["local", "remote"] = "local"
+    # http://<private IP>:<port> of that API (VPN address); the bearer token
+    # comes from the NRSP_INFERENCE_TOKEN environment variable.
+    remote_api_url: str | None = None
+    remote_timeout_seconds: float = Field(default=20.0, ge=2.0, le=120.0)
     llm_max_tokens: int = Field(default=80, ge=16, le=512)
     # Process the next turn's known prompt prefix while the bot speaks
     # (ConversationController._prefill_next_turn); any server that caches
@@ -111,6 +121,47 @@ class LocalVoicePipelineSettings(BaseModel):
         if not value.startswith(allowed):
             raise ValueError("Ollama endpoint must be loopback")
         return value.rstrip("/")
+
+    @field_validator("remote_api_url")
+    @classmethod
+    def remote_must_be_private(cls, value: str | None) -> str | None:
+        """Only an explicitly configured private IP literal (the VPN address of
+        our VM): no hostnames, no public addresses, plain path-free URL."""
+        if value is None:
+            return value
+        parts = urlsplit(value)
+        if parts.scheme != "http" or parts.path not in ("", "/") or not parts.port:
+            raise ValueError("remote_api_url must look like http://10.x.y.z:port")
+        try:
+            address = ipaddress.ip_address(parts.hostname or "")
+        except ValueError as exc:
+            raise ValueError("remote_api_url must use an IP address") from exc
+        if not (address.is_private or address.is_loopback) or address.is_unspecified:
+            raise ValueError("remote_api_url must be a private (VPN) address")
+        return value.rstrip("/")
+
+    @property
+    def remote(self) -> bool:
+        return self.inference == "remote"
+
+    @property
+    def llm_base_url(self) -> str:
+        if self.remote:
+            if not self.remote_api_url:
+                raise ValueError("inference = remote needs remote_api_url")
+            return f"{self.remote_api_url}/v1"
+        return self.ollama_base_url
+
+    def auth_headers(self) -> dict[str, str]:
+        if not self.remote:
+            return {}
+        token = os.environ.get(REMOTE_TOKEN_ENV, "")
+        if len(token) < 24:
+            raise ValueError(f"{REMOTE_TOKEN_ENV} must hold the API token")
+        return {"Authorization": f"Bearer {token}"}
+
+
+REMOTE_TOKEN_ENV = "NRSP_INFERENCE_TOKEN"
 
 
 # Model weights are loaded once per process and shared by every call's
@@ -164,6 +215,35 @@ LLM_EXTRA_BODY = {
 WHISPER_MAX_TOKENS_PER_TURN = 96
 
 
+def transcribe_pcm16(
+    model: WhisperModel,
+    pcm16: bytes,
+    language: str,
+    prompt: str | None,
+    no_speech_prob: float | None,
+) -> str:
+    """One caller segment (16 kHz mono PCM16) -> text, with bounded decoding.
+
+    Shared by the in-process STT service and the VM inference API so both
+    paths decode identically."""
+    samples = np.frombuffer(pcm16, dtype=np.int16).astype(np.float32) / 32768.0
+    segments, _ = model.transcribe(
+        samples,
+        language=language,
+        initial_prompt=prompt,
+        beam_size=5,
+        temperature=0.0,
+        condition_on_previous_text=False,
+        without_timestamps=True,
+        max_new_tokens=WHISPER_MAX_TOKENS_PER_TURN,
+    )
+    return " ".join(
+        s.text.strip()
+        for s in segments
+        if no_speech_prob is None or s.no_speech_prob < no_speech_prob
+    ).strip()
+
+
 class SharedWhisperSTTService(WhisperSTTService):
     """Whisper STT that reuses a process-wide model from the project cache."""
 
@@ -197,37 +277,73 @@ class SharedWhisperSTTService(WhisperSTTService):
             yield ErrorFrame("Whisper model not available")
             return
         await self.start_processing_metrics()
-        samples = np.frombuffer(audio, dtype=np.int16).astype(np.float32) / 32768.0
         language = assert_given(self._settings.language)
         prompt = assert_given(self._settings.initial_prompt)
         threshold = assert_given(self._settings.no_speech_prob)
-        model = self._model
-
-        def transcribe() -> list[Any]:
-            segments, _ = model.transcribe(
-                samples,
-                language=language,
-                initial_prompt=prompt,
-                beam_size=5,
-                temperature=0.0,
-                condition_on_previous_text=False,
-                without_timestamps=True,
-                max_new_tokens=WHISPER_MAX_TOKENS_PER_TURN,
-            )
-            return list(segments)
-
-        segments = await asyncio.to_thread(transcribe)
-        text = " ".join(
-            s.text.strip()
-            for s in segments
-            if threshold is None or s.no_speech_prob < threshold
-        ).strip()
+        text = await asyncio.to_thread(
+            transcribe_pcm16, self._model, audio, str(language), prompt, threshold
+        )
         await self.stop_processing_metrics()
         # Offline diagnostics only: NRSP_STT_DUMP_DIR keeps the exact segments
         # Whisper receives so ASR failures can be replayed. Never set it on a
         # customer call; the dump contains caller audio.
         if dump_dir := os.environ.get("NRSP_STT_DUMP_DIR"):
             await asyncio.to_thread(_dump_segment, Path(dump_dir), audio, [text])
+        if text:
+            await self._handle_transcription(text, True, language)
+            logger.debug(f"Transcription: [{text}]")
+            yield TranscriptionFrame(text, self._user_id, time_now_iso8601(), language)
+
+
+class RemoteWhisperSTTService(WhisperSTTService):
+    """Whisper STT whose decoding runs on the private inference API.
+
+    Keeps WhisperSTTService's settings (language, initial_prompt,
+    no_speech_prob), so the engine's per-turn ASR prompt switch works
+    unchanged; segments come from the same Silero VAD as local mode."""
+
+    def __init__(
+        self,
+        *,
+        api_url: str,
+        session: aiohttp.ClientSession,
+        timeout_s: float,
+        **kwargs: object,
+    ) -> None:
+        self._api_url = api_url
+        self._session = session
+        self._timeout = aiohttp.ClientTimeout(total=timeout_s)
+        super().__init__(**kwargs)
+
+    def _load(self) -> None:  # no local weights
+        unsupported = self._unsupported_language()
+        if unsupported:
+            raise ValueError(unsupported)
+
+    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame]:
+        await self.start_processing_metrics()
+        language = assert_given(self._settings.language)
+        prompt = assert_given(self._settings.initial_prompt)
+        threshold = assert_given(self._settings.no_speech_prob)
+        query = f"language={language}"
+        if prompt:
+            query += f"&prompt={quote(prompt)}"
+        if threshold is not None:
+            query += f"&no_speech_prob={threshold}"
+        try:
+            async with self._session.post(
+                f"{self._api_url}/v1/asr?{query}",
+                data=audio,
+                headers={"Content-Type": "application/octet-stream"},
+                timeout=self._timeout,
+            ) as response:
+                response.raise_for_status()
+                text = str((await response.json())["text"]).strip()
+        except (aiohttp.ClientError, TimeoutError, KeyError, ValueError) as exc:
+            # The turn falls through to the engine's silence/repeat prompts.
+            logger.warning(f"remote ASR failed: {type(exc).__name__}: {exc}")
+            text = ""
+        await self.stop_processing_metrics()
         if text:
             await self._handle_transcription(text, True, language)
             logger.debug(f"Transcription: [{text}]")
@@ -272,6 +388,8 @@ class EngineLLMService(OLLamaLLMService):
 
 def preload_models(settings: LocalVoicePipelineSettings) -> None:
     """Load ASR/TTS weights before dialing so answer-to-greeting is fast."""
+    if settings.remote:
+        return  # weights live on the inference API
     shared_whisper_model(
         settings.asr_model,
         settings.asr_device,
@@ -289,6 +407,12 @@ class LocalVoiceAgent:
     worker: PipelineWorker
     controller: ConversationController
     record: ConversationRecord
+    # Remote inference connection pool (None in local mode).
+    http: aiohttp.ClientSession | None = None
+
+    async def aclose(self) -> None:
+        if self.http is not None and not self.http.closed:
+            await self.http.close()
 
     async def queue_initial_greeting(self) -> None:
         await self.controller.greet()
@@ -296,7 +420,9 @@ class LocalVoiceAgent:
     async def on_keypad(self, key: str) -> None:
         await self.controller.on_keypad(key)
 
-    async def prewarm_llm(self, base_url: str, model: str) -> None:
+    async def prewarm_llm(
+        self, base_url: str, model: str, headers: dict[str, str] | None = None
+    ) -> None:
         """Fill the LLM server's prefix cache with this call's system prompt
         while the phone rings, so the first caller turn pays only for its
         own tokens (measured ~87 prompt tokens/s on 4 CPU threads)."""
@@ -311,17 +437,19 @@ class LocalVoiceAgent:
             "reasoning_effort": "none",
             **LLM_EXTRA_BODY,
         }
-        await asyncio.to_thread(_post_json, f"{base_url}/chat/completions", body)
+        await asyncio.to_thread(
+            _post_json, f"{base_url}/chat/completions", body, headers
+        )
 
 
-def _post_json(url: str, body: dict) -> None:
+def _post_json(url: str, body: dict, headers: dict[str, str] | None = None) -> None:
     import json
     import urllib.request
 
     request = urllib.request.Request(
         url,
         data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", **(headers or {})},
     )
     try:
         with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310
@@ -346,21 +474,57 @@ def build_local_voice_agent(
     Task behaviour comes entirely from ``engine`` (agent profile + call data).
     """
     record = ConversationRecord()
-    stt = SharedWhisperSTTService(
-        model_dir=settings.asr_model_dir,
-        threads=settings.asr_cpu_threads,
-        device=settings.asr_device,
-        compute_type=settings.asr_compute_type,
-        settings=WhisperSTTService.Settings(
-            model=settings.asr_model,
-            language=Language.UR,
-            no_speech_prob=0.4,
-            initial_prompt=engine.profile.asr_prompts.get("default"),
-        ),
+    headers = settings.auth_headers()
+    stt_settings = WhisperSTTService.Settings(
+        model=settings.asr_model,
+        language=Language.UR,
+        no_speech_prob=0.4,
+        initial_prompt=engine.profile.asr_prompts.get("default"),
     )
+    voice = engine.profile.tts_voice or settings.tts_voice
+    # Pipecat's 3 s default closes the audio context between slowly streamed
+    # LLM sentences; three such contexts in a row mark TTS unusable, which
+    # ends the call under ProcessorUnusablePolicy.END.
+    tts_stop_timeout_s = 8.0
+    http: aiohttp.ClientSession | None = None
+    if settings.remote:
+        assert settings.remote_api_url is not None
+        # Bounded connection pool; per-request timeouts are set per call.
+        http = aiohttp.ClientSession(
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=settings.remote_timeout_seconds),
+            connector=aiohttp.TCPConnector(limit=4, keepalive_timeout=30),
+        )
+        stt: WhisperSTTService = RemoteWhisperSTTService(
+            api_url=settings.remote_api_url,
+            session=http,
+            timeout_s=settings.remote_timeout_seconds,
+            settings=stt_settings,
+        )
+        tts: Any = PiperHttpTTSService(
+            base_url=f"{settings.remote_api_url}/v1/tts",
+            aiohttp_session=http,
+            stop_frame_timeout_s=tts_stop_timeout_s,
+            settings=PiperHttpTTSService.Settings(voice=voice, language=Language.UR),
+        )
+    else:
+        stt = SharedWhisperSTTService(
+            model_dir=settings.asr_model_dir,
+            threads=settings.asr_cpu_threads,
+            device=settings.asr_device,
+            compute_type=settings.asr_compute_type,
+            settings=stt_settings,
+        )
+        tts = PiperTTSService(
+            download_dir=settings.tts_model_dir,
+            stop_frame_timeout_s=tts_stop_timeout_s,
+            settings=PiperTTSService.Settings(voice=voice, language=Language.UR),
+        )
     llm = EngineLLMService(
         engine,
-        base_url=settings.ollama_base_url,
+        base_url=settings.llm_base_url,
+        # Sent as "Authorization: Bearer" by the OpenAI client (remote API).
+        **({"api_key": headers["Authorization"][7:]} if headers else {}),
         settings=OLLamaLLMService.Settings(
             model=settings.llm_model,
             # The controller sends the full message list per turn, starting
@@ -375,18 +539,6 @@ def build_local_voice_agent(
             },
         ),
     )
-    tts = PiperTTSService(
-        download_dir=settings.tts_model_dir,
-        # Pipecat's 3 s default closes the audio context between slowly
-        # streamed LLM sentences; three such contexts in a row mark TTS
-        # unusable, which ends the call under ProcessorUnusablePolicy.END.
-        stop_frame_timeout_s=8.0,
-        settings=PiperTTSService.Settings(
-            voice=engine.profile.tts_voice or settings.tts_voice,
-            language=Language.UR,
-        ),
-    )
-
     context = LLMContext()
     aggregators = LLMContextAggregatorPair(
         context,
@@ -422,8 +574,8 @@ def build_local_voice_agent(
             "reasoning_effort": "none",
             **LLM_EXTRA_BODY,
         }
-        url = f"{settings.ollama_base_url}/chat/completions"
-        await asyncio.to_thread(_post_json, url, body)
+        url = f"{settings.llm_base_url}/chat/completions"
+        await asyncio.to_thread(_post_json, url, body, headers)
 
     controller = ConversationController(
         engine,
@@ -463,4 +615,6 @@ def build_local_voice_agent(
         idle_timeout_secs=settings.idle_timeout_seconds,
         processor_unusable_policy=ProcessorUnusablePolicy.END,
     )
-    return LocalVoiceAgent(worker=worker, controller=controller, record=record)
+    return LocalVoiceAgent(
+        worker=worker, controller=controller, record=record, http=http
+    )

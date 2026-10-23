@@ -19,3 +19,6 @@ data/*.csv
 
 !tests/fixtures/caller/*.wav
 data/eval/
+
+# Machine-local settings and secrets (VM API token, SIP credentials, test data)
+config/local/

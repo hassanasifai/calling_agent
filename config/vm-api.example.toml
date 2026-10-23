@@ -1,0 +1,15 @@
+# Template for the VM inference API. setup.sh copies it to
+# config/local/vm-api.toml (Git-ignored); edit that copy, not this file.
+[api]
+# The VM's VPN-reachable private address. Never 0.0.0.0.
+bind_host = "10.20.30.111"
+port = 18440
+# Client networks allowed to call the API: the Windows laptop's VPN address.
+allowed_clients = ["__CLIENT__"]
+# Loopback llama-server started by calling-llm.service.
+llm_upstream = "http://127.0.0.1:18431"
+asr_model = "data/models/ct2/whisper-small-urdu"
+asr_compute_type = "int8"
+asr_cpu_threads = 6
+tts_model_dir = "data/models/piper"
+tts_voices = ["ur_PK-aegis_female-medium"]

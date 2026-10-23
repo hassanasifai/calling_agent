@@ -85,8 +85,11 @@ class FakeAgent:
         self.greetings += 1
         self.greeted.set()
 
-    async def prewarm_llm(self, base_url: str, model: str) -> None:
+    async def prewarm_llm(self, base_url: str, model: str, headers=None) -> None:
         self.prewarmed = (base_url, model)
+
+    async def aclose(self) -> None:
+        self.closed = True
 
     async def on_keypad(self, key: str) -> None:
         self.keys = getattr(self, "keys", "") + key

@@ -1,0 +1,12 @@
+# Windows laptop: lightweight orchestration, all inference on the VM API.
+# Copy to config\local\windows.toml (Git-ignored); the token goes in
+# config\local\windows.env as NRSP_INFERENCE_TOKEN=... (from the VM's
+# config/local/vm-api.env).
+[voice]
+inference = "remote"
+remote_api_url = "http://10.20.30.111:18440"
+remote_timeout_seconds = 20.0
+llm_model = "gemma-4-E2B"
+tts_voice = "ur_PK-aegis_female-medium"
+idle_timeout_seconds = 120.0
+llm_understanding_timeout_seconds = 12.0

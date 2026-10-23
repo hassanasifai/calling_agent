@@ -170,3 +170,20 @@ read back for yes/no confirmation; the LLM never reconstructs numbers. DTMF
 measured choosing them for "who is calling?" and "I can't hear you"; during a
 confirmation only yes/no, a new verification attempt and safety exits are
 allowed.
+
+## ADR-011: Inference on the VM behind one private API; thin Windows client
+
+Status: accepted, 2026-10-23.
+
+The laptop keeps SIP/RTP (Go/Diago), Pipecat orchestration and Silero VAD;
+ASR, LLM and TTS run on the VM as user systemd units (`calling-ai.slice`:
+6 CPU, 12 GB, Nice 5, restart always). One aiohttp process
+(`nrsp_agent/inference_api.py`) serves ASR and TTS with the same model code as
+local mode and proxies the loopback llama-server, so there is one endpoint,
+one token and one allowlist. Pipecat's `PiperHttpTTSService` and the existing
+OpenAI-compatible LLM client are reused; only ASR needed a thin subclass (to
+keep the engine's per-turn Whisper prompt). Binding is to the VPN-reachable
+private address only; remote URLs must be private IP literals. Measured on the
+VM: remote mode added no measurable latency (ASR round trip 2.301 s vs 2.299 s
+server decode); real VPN overhead is to be measured from Windows. Local mode
+remains the default and unchanged.

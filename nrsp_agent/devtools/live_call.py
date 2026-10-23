@@ -26,6 +26,8 @@ from nrsp_agent.agent import build_engine
 from nrsp_agent.session import run_outbound_session
 from nrsp_agent.telephony.diago import DiagoTelephonyPort
 from nrsp_agent.voice.local_pipeline import (
+    LLM_EXTRA_BODY,
+    _post_json,
     load_local_voice_settings,
     preload_models,
 )
@@ -36,13 +38,33 @@ async def run(args: argparse.Namespace) -> dict:
     host, _, port = os.environ.get(
         "NRSP_BRIDGE_CONTROL_ADDRESS", "127.0.0.1:8765"
     ).rpartition(":")
-    settings = load_local_voice_settings(args.settings)
-    call_data = json.loads(args.call_data.read_text(encoding="utf-8"))
-    engine = build_engine(args.profile_dir, call_data)
-    await asyncio.to_thread(preload_models, settings)
     async with DiagoTelephonyPort(token, host=host, port=int(port)) as bridge:
         if not await bridge.ready():
             raise SystemExit("bridge is not registered with the PBX")
+        if args.check_only:
+            return {"registered": True}
+        settings = load_local_voice_settings(args.settings)
+        call_data = json.loads(args.call_data.read_text(encoding="utf-8"))
+        engine = build_engine(args.profile_dir, call_data)
+        await asyncio.to_thread(preload_models, settings)
+        # Fill the server's cache with this profile's system prompt before
+        # dialing: cold, it costs ~26 s of prompt processing on the VM CPU.
+        warm = {
+            "model": settings.llm_model,
+            "messages": [
+                {"role": "system", "content": engine.system_prompt()},
+                {"role": "user", "content": "."},
+            ],
+            "max_tokens": 1,
+            "reasoning_effort": "none",
+            **LLM_EXTRA_BODY,
+        }
+        await asyncio.to_thread(
+            _post_json,
+            f"{settings.llm_base_url}/chat/completions",
+            warm,
+            settings.auth_headers(),
+        )
         result = await run_outbound_session(
             bridge,
             number=args.number,
@@ -56,11 +78,14 @@ async def run(args: argparse.Namespace) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--number", required=True, help="exact allowlisted string")
+    parser.add_argument("--number", default="", help="exact allowlisted string")
+    parser.add_argument(
+        "--check-only", action="store_true", help="report SIP registration only"
+    )
     parser.add_argument("--gateway", default="sim-1")
-    parser.add_argument("--profile-dir", type=Path, required=True)
-    parser.add_argument("--call-data", type=Path, required=True)
-    parser.add_argument("--settings", type=Path, required=True)
+    parser.add_argument("--profile-dir", type=Path)
+    parser.add_argument("--call-data", type=Path)
+    parser.add_argument("--settings", type=Path)
     parser.add_argument("--out", type=Path, default=Path(".tmp/live"))
     args = parser.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
@@ -71,7 +96,14 @@ def main() -> None:
     logger.remove()
     logger.add(args.out / "pipeline.log", level="DEBUG", encoding="utf-8")
     logger.add(sys.stderr, level="WARNING")
+    if not args.check_only and not (
+        args.number and args.profile_dir and args.call_data and args.settings
+    ):
+        parser.error("--number, --profile-dir, --call-data and --settings needed")
     summary = asyncio.run(run(args))
+    if args.check_only:
+        print("sip_registered=true")
+        return
     path = args.out / f"{summary['call_id']}.json"
     path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), "utf-8")
     print(f"result={summary['result']} outcome={summary['outcome']} -> {path}")
